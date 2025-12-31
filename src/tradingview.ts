@@ -268,6 +268,55 @@ export class TradingViewClient {
     }
 
     /**
+     * Ensure session is connected, handling multiple potential disconnect modals
+     */
+    private async ensureConnection(): Promise<void> {
+        if (!this.page) return;
+
+        // Try up to 3 times to clear disconnect modals (handles sequential modals)
+        for (let i = 0; i < 3; i++) {
+            const disconnectType = await this.page.evaluate(() => {
+                const bodyText = document.body.innerText;
+                // Type A: Account accessed elsewhere
+                if (bodyText.includes('Your session ended because your account was accessed from another browser')) {
+                    return 'ACCOUNT_ACCESSED';
+                }
+                // Type B: Generic connection closed (e.g. timeout/paywall)
+                const closedTitle = document.querySelector('.title-qAW2FX1Z');
+                if (closedTitle && closedTitle.textContent?.includes("We've closed this connection")) {
+                    return 'CONNECTION_CLOSED';
+                }
+                return null;
+            });
+
+            if (!disconnectType) {
+                if (i > 0) console.log("✅ Connection verified/restored.");
+                return; // All good
+            }
+
+            console.log(`⚠️  Disconnect detected (${disconnectType}). Attempt ${i + 1}/3 to reconnect...`);
+
+            // Try all known reconnect buttons
+            // 1. Session ended buttons (.wrapperButton..., .button-Z0...)
+            // 2. Connection closed button (data-qa-id="close_paywall_button")
+            const connectBtn = await this.page.$('.wrapperButton-yXyW_CNE button, button.button-Z0XMhbiI, button[data-qa-id="close_paywall_button"]');
+
+            if (connectBtn) {
+                console.log("   Clicking reconnect/refresh button...");
+                await connectBtn.click();
+                // Wait for modal to disappear or next one to appear. 
+                // The user noted "sometimes after you click restore connection.. it shows the 'session disconnected' modal"
+                await this.delay(2500);
+            } else {
+                console.log("   No connect button found yet, waiting...");
+                await this.delay(1000);
+            }
+        }
+        console.log("❌ Failed to fully restore connection after 3 attempts. Proceeding anyway...");
+    }
+
+
+    /**
      * Place a market order with optional TP/SL
      */
     async placeMarketOrder(params: OrderParams): Promise<{ success: boolean; error?: string }> {
@@ -282,30 +331,8 @@ export class TradingViewClient {
         if (params.takeProfit) console.log(`   Take Profit: $${params.takeProfit}`);
 
         try {
-            // Check for session disconnect and reconnect if needed
-            const disconnectType = await this.page.evaluate(() => {
-                const bodyText = document.body.innerText;
-                if (bodyText.includes('Your session ended because your account was accessed from another browser')) {
-                    return 'ACCOUNT_ACCESSED';
-                }
-                const closedTitle = document.querySelector('.title-qAW2FX1Z');
-                if (closedTitle && closedTitle.textContent?.includes("We've closed this connection")) {
-                    return 'CONNECTION_CLOSED';
-                }
-                return null;
-            });
-
-            if (disconnectType) {
-                console.log(`⚠️  Disconnect detected: ${disconnectType}. Reconnecting...`);
-                // Try original selectors + new data-qa-id selector
-                const connectBtn = await this.page.$('.wrapperButton-yXyW_CNE button, button.button-Z0XMhbiI, button[data-qa-id="close_paywall_button"]');
-
-                if (connectBtn) {
-                    await connectBtn.click();
-                    await this.delay(2000);
-                    console.log("✅ Reconnected!");
-                }
-            }
+            // Ensure we are connected before trying to interact
+            await this.ensureConnection();
 
             // Ensure order form is open
             await this.openOrderForm();
