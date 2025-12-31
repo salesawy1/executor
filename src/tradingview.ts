@@ -283,13 +283,23 @@ export class TradingViewClient {
 
         try {
             // Check for session disconnect and reconnect if needed
-            const sessionEnded = await this.page.evaluate(() => {
-                return document.body.innerText.includes('Your session ended because your account was accessed from another browser');
+            const disconnectType = await this.page.evaluate(() => {
+                const bodyText = document.body.innerText;
+                if (bodyText.includes('Your session ended because your account was accessed from another browser')) {
+                    return 'ACCOUNT_ACCESSED';
+                }
+                const closedTitle = document.querySelector('.title-qAW2FX1Z');
+                if (closedTitle && closedTitle.textContent?.includes("We've closed this connection")) {
+                    return 'CONNECTION_CLOSED';
+                }
+                return null;
             });
 
-            if (sessionEnded) {
-                console.log("⚠️  Session disconnected! Reconnecting...");
-                const connectBtn = await this.page.$('.wrapperButton-yXyW_CNE button, button.button-Z0XMhbiI');
+            if (disconnectType) {
+                console.log(`⚠️  Disconnect detected: ${disconnectType}. Reconnecting...`);
+                // Try original selectors + new data-qa-id selector
+                const connectBtn = await this.page.$('.wrapperButton-yXyW_CNE button, button.button-Z0XMhbiI, button[data-qa-id="close_paywall_button"]');
+
                 if (connectBtn) {
                     await connectBtn.click();
                     await this.delay(2000);
