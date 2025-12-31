@@ -1,19 +1,19 @@
 /**
- * Executor Service
+ * Executor Service - TradingView Edition
  * 
  * Express HTTP server that receives trade commands and executes them
- * on Kraken Futures Demo.
+ * via TradingView Paper Trading using Puppeteer automation.
  * 
  * Endpoints:
- *   POST /trade      - Execute a trade
- *   GET  /balance    - Get account balance
- *   GET  /positions  - Get open positions
- *   GET  /health     - Health check
+ *   POST /trade            - Execute a trade
+ *   POST /execute-consensus - Execute from trade_execution.json
+ *   GET  /health           - Health check
+ *   GET  /screenshot       - Take screenshot of current state
  */
 
 import * as dotenv from "dotenv";
 import express, { Request, Response } from "express";
-import { KrakenFuturesClient, mapSymbol } from "./kraken.js";
+import { TradingViewClient, buildChartUrl } from "./tradingview.js";
 import { TradeExecutionRequest, TradeExecutionResponse } from "./types.js";
 
 // Load environment variables
@@ -21,20 +21,54 @@ dotenv.config();
 
 const PORT = process.env.PORT || 3001;
 
-// Validate required env vars
-const apiKey = process.env.KRAKEN_DEMO_API_KEY;
-const apiSecret = process.env.KRAKEN_DEMO_API_SECRET;
+// TradingView credentials
+const tvEmail = process.env.TRADINGVIEW_EMAIL;
+const tvPassword = process.env.TRADINGVIEW_PASSWORD;
+const tvChartUrl = process.env.TRADINGVIEW_CHART_URL || "https://www.tradingview.com/chart/2hWy6ct3/?symbol=MEXC%3AETHUSDT.P";
+const headless = process.env.HEADLESS === "true";
 
-if (!apiKey || !apiSecret) {
+// Parse CLI args for test mode
+const args = process.argv.slice(2);
+const testMode = args.includes("--test") || args.includes("test=true") || process.env.TEST_MODE === "true";
+
+if (!tvEmail || !tvPassword) {
     console.error("❌ Missing required environment variables:");
-    console.error("   KRAKEN_DEMO_API_KEY");
-    console.error("   KRAKEN_DEMO_API_SECRET");
-    console.error("\nGet these from https://demo-futures.kraken.com");
+    console.error("   TRADINGVIEW_EMAIL");
+    console.error("   TRADINGVIEW_PASSWORD");
     process.exit(1);
 }
 
-// Initialize Kraken client
-const kraken = new KrakenFuturesClient(apiKey, apiSecret, false);
+// Initialize TradingView client
+let tvClient: TradingViewClient | null = null;
+let initializationPromise: Promise<void> | null = null;
+
+async function initializeClient(): Promise<void> {
+    if (tvClient?.isReady()) return;
+
+    if (initializationPromise) {
+        await initializationPromise;
+        return;
+    }
+
+    initializationPromise = (async () => {
+        console.log("🚀 Initializing TradingView client...");
+        tvClient = new TradingViewClient({
+            email: tvEmail!,
+            password: tvPassword!,
+            chartUrl: tvChartUrl,
+            headless,
+        });
+        await tvClient.initialize();
+
+        // Pre-open order form so it's ready
+        console.log("📝 Preparing order form...");
+        await tvClient.prepareOrderForm();
+
+        console.log("✅ TradingView client ready!");
+    })();
+
+    await initializationPromise;
+}
 
 // Create Express app
 const app = express();
@@ -50,37 +84,36 @@ app.use(express.json());
 app.get("/health", (_req: Request, res: Response) => {
     res.json({
         status: "ok",
-        service: "executor",
-        environment: "demo",
+        service: "executor-tradingview",
+        environment: "paper",
+        clientReady: tvClient?.isReady() ?? false,
+        chartUrl: tvChartUrl,
         timestamp: new Date().toISOString(),
     });
 });
 
 /**
- * Get Account Balance
+ * Take Screenshot
  */
-app.get("/balance", async (_req: Request, res: Response) => {
+app.get("/screenshot", async (_req: Request, res: Response) => {
     try {
-        const accounts = await kraken.getAccounts();
-        res.json(accounts);
-    } catch (error) {
-        console.error("Error fetching balance:", error);
-        res.status(500).json({
-            error: true,
-            message: error instanceof Error ? error.message : String(error),
-        });
-    }
-});
+        if (!tvClient?.isReady()) {
+            res.status(503).json({
+                error: true,
+                message: "TradingView client not ready",
+            });
+            return;
+        }
 
-/**
- * Get Open Positions
- */
-app.get("/positions", async (_req: Request, res: Response) => {
-    try {
-        const positions = await kraken.getOpenPositions();
-        res.json(positions);
+        const filename = `screenshot_${Date.now()}.png`;
+        await tvClient.screenshot(filename);
+        res.json({
+            success: true,
+            filename,
+            timestamp: new Date().toISOString(),
+        });
     } catch (error) {
-        console.error("Error fetching positions:", error);
+        console.error("Error taking screenshot:", error);
         res.status(500).json({
             error: true,
             message: error instanceof Error ? error.message : String(error),
@@ -91,26 +124,34 @@ app.get("/positions", async (_req: Request, res: Response) => {
 /**
  * Execute Trade
  * 
- * Accepts trade requests from consensus and executes on Kraken Demo.
- * 
  * Request body:
  * {
- *   "symbol": "ETHUSDT",        // Bybit format (will be converted)
- *   "direction": "LONG",         // LONG or SHORT
- *   "size": 0.1,                 // Contract size
- *   "orderType": "mkt",          // mkt, lmt, stp, ioc
- *   "limitPrice": 3000           // Required for limit orders
+ *   "symbol": "ETHUSDT",
+ *   "direction": "LONG",
+ *   "size": 0.1,
+ *   "stopLoss": 3000,
+ *   "takeProfit": 3500
  * }
  */
 app.post("/trade", async (req: Request, res: Response) => {
     try {
+        await initializeClient();
+
+        if (!tvClient?.isReady()) {
+            res.status(503).json({
+                success: false,
+                error: "TradingView client not ready",
+            });
+            return;
+        }
+
         const {
             symbol,
             direction,
-            size = 0.01,
-            orderType = "mkt",
-            limitPrice,
-        }: TradeExecutionRequest & { size?: number; orderType?: string; limitPrice?: number } = req.body;
+            size = 1,
+            stopLoss,
+            takeProfit,
+        }: TradeExecutionRequest & { size?: number; stopLoss?: number; takeProfit?: number } = req.body;
 
         if (!symbol || !direction) {
             res.status(400).json({
@@ -120,51 +161,32 @@ app.post("/trade", async (req: Request, res: Response) => {
             return;
         }
 
-        // Map symbol from Bybit format to Kraken format
-        let krakenSymbol: string;
-        try {
-            krakenSymbol = mapSymbol(symbol);
-        } catch (e) {
-            res.status(400).json({
-                success: false,
-                error: e instanceof Error ? e.message : String(e),
-            });
-            return;
-        }
-
-        // Convert direction to side
-        const side = direction === "LONG" ? "buy" : "sell";
-
         console.log(`\n📊 Trade Request:`);
-        console.log(`   Symbol: ${symbol} → ${krakenSymbol}`);
-        console.log(`   Direction: ${direction} (${side})`);
+        console.log(`   Symbol: ${symbol}`);
+        console.log(`   Direction: ${direction}`);
         console.log(`   Size: ${size}`);
-        console.log(`   Order Type: ${orderType}`);
-        if (limitPrice) console.log(`   Limit Price: ${limitPrice}`);
+        if (stopLoss) console.log(`   Stop Loss: ${stopLoss}`);
+        if (takeProfit) console.log(`   Take Profit: ${takeProfit}`);
 
-        // Execute order
-        const result = await kraken.sendOrder({
-            symbol: krakenSymbol,
-            side: side as "buy" | "sell",
-            size,
-            orderType: orderType as "mkt" | "lmt" | "stp" | "take_profit" | "ioc" | "post",
-            limitPrice,
+        // Place order via Puppeteer
+        const result = await tvClient.placeMarketOrder({
+            direction: direction as "LONG" | "SHORT",
+            quantity: size,
+            stopLoss,
+            takeProfit,
         });
 
-        console.log(`📋 Order Result:`, JSON.stringify(result, null, 2));
-
         const response: TradeExecutionResponse = {
-            success: result.result === "success",
-            orderId: result.sendStatus?.order_id,
-            symbol: krakenSymbol,
-            side,
+            success: result.success,
+            symbol,
+            side: direction === "LONG" ? "buy" : "sell",
             size,
-            price: limitPrice,
+            price: await tvClient.getCurrentPrice() || undefined,
             timestamp: new Date().toISOString(),
         };
 
-        if (result.result !== "success") {
-            response.error = result.error || "Order failed";
+        if (!result.success) {
+            response.error = result.error;
         }
 
         res.json(response);
@@ -182,19 +204,21 @@ app.post("/trade", async (req: Request, res: Response) => {
  * Execute from trade_execution.json format (Full Trade Setup)
  * 
  * Accepts the direct output from consensus trade_execution.json.
- * Supports:
- * - MAX position sizing (uses full account balance)
- * - Stop Loss order placement
- * - Take Profit order placement
- * - Entry price validation (within $4 tolerance)
  * 
  * Request body: trade_execution.json content
- * Optional query params:
- *   ?size=MAX - Use maximum possible position size
- *   ?size=0.5 - Use specific size
  */
 app.post("/execute-consensus", async (req: Request, res: Response) => {
     try {
+        await initializeClient();
+
+        if (!tvClient?.isReady()) {
+            res.status(503).json({
+                success: false,
+                error: "TradingView client not ready",
+            });
+            return;
+        }
+
         const {
             symbol,
             verdict,
@@ -202,9 +226,10 @@ app.post("/execute-consensus", async (req: Request, res: Response) => {
             confidence,
         } = req.body;
 
-        // Check query param for size override
-        const sizeParam = (req.query.size as string) || "MAX";
-        const useMaxSize = sizeParam.toUpperCase() === "MAX";
+        // Check query param for size override (-1 means auto-size from equity)
+        const sizeParam = req.query.size as string;
+        const parsedSize = sizeParam ? parseFloat(sizeParam) : -1;
+        const size = isNaN(parsedSize) ? -1 : parsedSize; // Handle NaN -> auto-margin mode
 
         if (!verdict || verdict === "NO_TRADE" || verdict === "UNCERTAINTY") {
             res.json({
@@ -223,166 +248,44 @@ app.post("/execute-consensus", async (req: Request, res: Response) => {
             return;
         }
 
-        // Map symbol
-        let krakenSymbol: string;
-        try {
-            krakenSymbol = mapSymbol(symbol);
-        } catch (e) {
-            res.status(400).json({
-                success: false,
-                error: e instanceof Error ? e.message : String(e),
-            });
-            return;
-        }
-
         const direction = tradeSetup.direction as "LONG" | "SHORT";
-        const side = direction === "LONG" ? "buy" : "sell";
-        const oppositeSide = direction === "LONG" ? "sell" : "buy";
 
         console.log(`\n${"═".repeat(60)}`);
-        console.log(`🏛️ CONSENSUS TRADE EXECUTION`);
+        console.log(`🏛️ CONSENSUS TRADE EXECUTION (TradingView)`);
         console.log(`${"═".repeat(60)}`);
-        console.log(`   Symbol: ${symbol} → ${krakenSymbol}`);
+        console.log(`   Symbol: ${symbol}`);
         console.log(`   Verdict: ${verdict}`);
         console.log(`   Direction: ${direction}`);
         console.log(`   Confidence: ${confidence}%`);
-
-        // Get current price
-        const ticker = await kraken.getTicker(krakenSymbol);
-        const currentPrice = parseFloat(ticker.tickers?.[0]?.markPrice || ticker.tickers?.[0]?.last || "0");
-
-        if (!currentPrice) {
-            res.status(500).json({
-                success: false,
-                error: "Could not fetch current price",
-            });
-            return;
-        }
-
-        console.log(`   Current Price: $${currentPrice}`);
-        console.log(`   Entry Price: $${tradeSetup.entryPrice} (info only, executing anyway)`);
-
-        // Calculate position size
-        let size: number;
-
-        if (useMaxSize) {
-            // Get account balance
-            const accounts = await kraken.getAccounts();
-            console.log(`   📊 Accounts:`, JSON.stringify(accounts, null, 2));
-
-            // Get available balance (flex collateral or available USD)
-            const accountData = accounts as any;
-            const flexAccount = accountData.accounts?.flex || accountData.accounts?.fi_xbtusd || accountData.accounts?.fi_ethusd;
-            const availableBalance = flexAccount?.availableMargin || flexAccount?.available || flexAccount?.balance || 0;
-
-            if (availableBalance <= 0) {
-                res.status(400).json({
-                    success: false,
-                    error: "No available balance",
-                });
-                return;
-            }
-
-            console.log(`   Available Balance: $${availableBalance}`);
-
-            // Calculate max contracts (assuming 1x leverage for safety on demo)
-            // For PF_ETHUSD: 1 contract = 1 ETH notional
-            // Use 90% of available to leave margin buffer
-            const usableBalance = availableBalance * 0.9;
-            size = Math.floor((usableBalance / currentPrice) * 100) / 100; // Round down to 0.01
-
-            console.log(`   MAX Size: ${size} contracts (~$${(size * currentPrice).toFixed(2)} notional)`);
-        } else {
-            size = parseFloat(sizeParam) || 0.01;
-            console.log(`   Fixed Size: ${size} contracts`);
-        }
-
-        if (size < 0.001) {
-            res.status(400).json({
-                success: false,
-                error: "Calculated size too small",
-            });
-            return;
-        }
-
+        console.log(`   Size: ${size === -1 ? 'AUTO (90% equity)' : size}`);
+        console.log(`   Entry Price: $${tradeSetup.entryPrice}`);
         console.log(`   Stop Loss: $${tradeSetup.stopLoss}`);
         console.log(`   Take Profit: $${tradeSetup.takeProfit1}`);
 
-        // Execute orders
-        const orders: any[] = [];
-
-        // 1. Main market order
-        console.log(`\n📤 Placing MARKET ${side.toUpperCase()} order...`);
-        const mainOrder = await kraken.sendOrder({
-            symbol: krakenSymbol,
-            side: side as "buy" | "sell",
-            size,
-            orderType: "mkt",
+        // Place order via Puppeteer
+        const result = await tvClient.placeMarketOrder({
+            direction,
+            quantity: size,
+            stopLoss: tradeSetup.stopLoss,
+            takeProfit: tradeSetup.takeProfit1,
         });
-        orders.push({ type: "main", result: mainOrder });
-        console.log(`   Result:`, mainOrder.result);
 
-        if (mainOrder.result !== "success") {
-            res.json({
-                success: false,
-                error: mainOrder.error || "Main order failed",
-                orders,
-                timestamp: new Date().toISOString(),
-            });
-            return;
-        }
-
-        // 2. Stop Loss order (reduce only)
-        if (tradeSetup.stopLoss) {
-            console.log(`\n📤 Placing STOP LOSS at $${tradeSetup.stopLoss}...`);
-            try {
-                const slOrder = await kraken.sendOrder({
-                    symbol: krakenSymbol,
-                    side: oppositeSide as "buy" | "sell",
-                    size,
-                    orderType: "stp",
-                    stopPrice: tradeSetup.stopLoss,
-                    reduceOnly: true,
-                });
-                orders.push({ type: "stopLoss", result: slOrder });
-                console.log(`   Result:`, slOrder.result);
-            } catch (e) {
-                console.error(`   ⚠️ Stop Loss failed:`, e);
-                orders.push({ type: "stopLoss", error: String(e) });
-            }
-        }
-
-        // 3. Take Profit order (reduce only)
-        if (tradeSetup.takeProfit1) {
-            console.log(`\n📤 Placing TAKE PROFIT at $${tradeSetup.takeProfit1}...`);
-            try {
-                const tpOrder = await kraken.sendOrder({
-                    symbol: krakenSymbol,
-                    side: oppositeSide as "buy" | "sell",
-                    size,
-                    orderType: "take_profit",
-                    stopPrice: tradeSetup.takeProfit1,
-                    reduceOnly: true,
-                });
-                orders.push({ type: "takeProfit", result: tpOrder });
-                console.log(`   Result:`, tpOrder.result);
-            } catch (e) {
-                console.error(`   ⚠️ Take Profit failed:`, e);
-                orders.push({ type: "takeProfit", error: String(e) });
-            }
-        }
+        const currentPrice = await tvClient.getCurrentPrice();
 
         console.log(`\n${"═".repeat(60)}`);
-        console.log(`✅ TRADE SETUP COMPLETE`);
+        if (result.success) {
+            console.log(`✅ TRADE SETUP COMPLETE`);
+        } else {
+            console.log(`❌ TRADE SETUP FAILED: ${result.error}`);
+        }
         console.log(`${"═".repeat(60)}\n`);
 
         res.json({
-            success: true,
-            symbol: krakenSymbol,
+            success: result.success,
+            symbol,
             direction,
-            side,
+            side: direction === "LONG" ? "buy" : "sell",
             size,
-            notionalValue: size * currentPrice,
             currentPrice,
             consensus: {
                 verdict,
@@ -391,7 +294,7 @@ app.post("/execute-consensus", async (req: Request, res: Response) => {
                 stopLoss: tradeSetup.stopLoss,
                 takeProfit: tradeSetup.takeProfit1,
             },
-            orders,
+            error: result.error,
             timestamp: new Date().toISOString(),
         });
     } catch (error) {
@@ -404,33 +307,135 @@ app.post("/execute-consensus", async (req: Request, res: Response) => {
     }
 });
 
+/**
+ * Navigate to a different symbol
+ */
+app.post("/navigate", async (req: Request, res: Response) => {
+    try {
+        const { symbol } = req.body;
+
+        if (!symbol) {
+            res.status(400).json({
+                success: false,
+                error: "Missing symbol parameter",
+            });
+            return;
+        }
+
+        // Build new chart URL with symbol
+        const newUrl = buildChartUrl(tvChartUrl, symbol);
+
+        // Reinitialize with new URL
+        if (tvClient) {
+            await tvClient.close();
+        }
+
+        tvClient = new TradingViewClient({
+            email: tvEmail!,
+            password: tvPassword!,
+            chartUrl: newUrl,
+            headless,
+        });
+        await tvClient.initialize();
+
+        res.json({
+            success: true,
+            symbol,
+            chartUrl: newUrl,
+            timestamp: new Date().toISOString(),
+        });
+    } catch (error) {
+        console.error("Error navigating:", error);
+        res.status(500).json({
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+            timestamp: new Date().toISOString(),
+        });
+    }
+});
+
+/**
+ * Graceful shutdown
+ */
+process.on("SIGINT", async () => {
+    console.log("\n🛑 Shutting down...");
+    if (tvClient) {
+        await tvClient.close();
+    }
+    process.exit(0);
+});
+
+process.on("SIGTERM", async () => {
+    console.log("\n🛑 Shutting down...");
+    if (tvClient) {
+        await tvClient.close();
+    }
+    process.exit(0);
+});
+
 // ============================================================================
 // START SERVER
 // ============================================================================
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
     console.log(`
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                        🚀 EXECUTOR SERVICE                                   ║
-║                    Kraken Futures Demo Trading                               ║
+║                     🚀 EXECUTOR SERVICE (TradingView)                        ║
+║                         Paper Trading via Puppeteer                          ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
   🌐 Server running on http://localhost:${PORT}
   
+  📊 Chart URL: ${tvChartUrl}
+  🤖 Headless: ${headless}
+  
   📡 Endpoints:
-     GET  /health     - Health check
-     GET  /balance    - Get account balance
-     GET  /positions  - Get open positions
-     POST /trade      - Execute a trade
+     GET  /health            - Health check
+     GET  /screenshot        - Take screenshot
+     POST /trade             - Execute a trade
      POST /execute-consensus - Execute from trade_execution.json
-
-  🔑 API Key: ${apiKey.substring(0, 8)}...
+     POST /navigate          - Navigate to different symbol
 
   📝 Example usage:
      curl http://localhost:${PORT}/health
-     curl http://localhost:${PORT}/balance
      curl -X POST http://localhost:${PORT}/trade \\
        -H "Content-Type: application/json" \\
-       -d '{"symbol":"ETHUSDT","direction":"LONG","size":0.01}'
+       -d '{"symbol":"ETHUSDT","direction":"LONG","size":1,"stopLoss":3000,"takeProfit":3500}'
+
+  ⏳ Initializing TradingView client...
 `);
+
+    // Initialize client on startup
+    try {
+        await initializeClient();
+        console.log(`\n  ✅ Ready to trade! Browser is open and order form is prepared.\n`);
+
+        // Run test trade if --test flag is set
+        if (testMode && tvClient) {
+            console.log(`\n${'═'.repeat(60)}`);
+            console.log(`🧪 TEST MODE: Running mock trade...`);
+            console.log(`${'═'.repeat(60)}`);
+            console.log(`   Direction: SHORT`);
+            console.log(`   Quantity: AUTO (90% equity)`);
+            console.log(`   Take Profit: $2960`);
+            console.log(`   Stop Loss: $3050`);
+            console.log(`${'═'.repeat(60)}\n`);
+
+            const result = await tvClient.placeMarketOrder({
+                direction: "SHORT",
+                quantity: -1,
+                takeProfit: 2960,
+                stopLoss: 3050,
+            });
+
+            if (result.success) {
+                console.log(`\n  🎉 TEST TRADE SUCCESSFUL!\n`);
+            } else {
+                console.log(`\n  ❌ TEST TRADE FAILED: ${result.error}\n`);
+            }
+        }
+    } catch (error) {
+        console.error(`\n  ❌ Failed to initialize TradingView client:`, error);
+        console.log(`  ⚠️  You can still try to trade - client will retry on first request.\n`);
+    }
 });
