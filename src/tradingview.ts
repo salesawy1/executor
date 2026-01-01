@@ -401,11 +401,104 @@ export class TradingViewClient {
     }
 
     /**
+     * Validate that the CDP connection is still alive.
+     * Returns 'valid' if connection is good, 'recovered' if we got a fresh page reference,
+     * or 'restart_needed' if the browser needs to be restarted.
+     */
+    private async validateConnection(): Promise<'valid' | 'recovered' | 'restart_needed'> {
+        if (!this.page || !this.browser) return 'restart_needed';
+
+        try {
+            // Simple evaluate to test if the frame is still attached
+            await this.page.evaluate(() => true);
+            return 'valid';
+        } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+
+            // Check for detached frame or protocol errors
+            if (errorMsg.includes('detached Frame') ||
+                errorMsg.includes('Protocol error') ||
+                errorMsg.includes('Target closed') ||
+                errorMsg.includes('Session closed')) {
+
+                console.log("⚠️  CDP connection stale (detached frame). Attempting recovery...");
+
+                try {
+                    // Try to get a fresh page reference
+                    const pages = await this.browser.pages();
+                    if (pages.length > 0) {
+                        // Find the TradingView page
+                        for (const page of pages) {
+                            try {
+                                const url = page.url();
+                                if (url.includes('tradingview.com')) {
+                                    this.page = page;
+                                    // Verify this page works
+                                    await this.page.evaluate(() => true);
+                                    console.log("✅ Recovered page reference from browser.");
+                                    return 'recovered';
+                                }
+                            } catch {
+                                // This page is also detached, continue
+                            }
+                        }
+                    }
+                } catch (recoveryError) {
+                    // Browser connection completely lost
+                }
+
+                console.log("❌ Could not recover page reference. Full browser restart needed.");
+                return 'restart_needed';
+            }
+
+            // Other errors, assume connection is okay but something else failed
+            return 'valid';
+        }
+    }
+
+    /**
+     * Restart the browser completely - close existing browser and reinitialize.
+     * Used when CDP connection is completely lost.
+     */
+    async restartBrowser(): Promise<void> {
+        console.log("\n🔄 Restarting browser...");
+
+        // Try to close existing browser gracefully
+        try {
+            if (this.browser) {
+                await this.browser.close();
+            }
+        } catch (e) {
+            // Browser may already be disconnected, that's fine
+            console.log("   (Browser was already disconnected)");
+        }
+
+        this.browser = null;
+        this.page = null;
+        this.isLoggedIn = false;
+        this.isBrokerConnected = false;
+
+        // Reinitialize
+        await this.initialize();
+        await this.prepareOrderForm();
+
+        console.log("✅ Browser restarted and ready!\n");
+    }
+
+    /**
      * Ensure session is connected, handling multiple potential disconnect modals
      * and broker disconnection scenarios
      */
     private async ensureConnection(): Promise<void> {
         if (!this.page) return;
+
+        // First, validate that our CDP connection is still alive
+        const connectionStatus = await this.validateConnection();
+        if (connectionStatus === 'restart_needed') {
+            // Restart browser and return - caller should retry
+            await this.restartBrowser();
+            return;
+        }
 
         // Try up to 3 times to clear disconnect modals (handles sequential modals)
         for (let i = 0; i < 3; i++) {
@@ -472,12 +565,20 @@ export class TradingViewClient {
 
     /**
      * Place a market order with optional TP/SL
+     * Will automatically restart browser and retry once if CDP connection is lost.
      */
-    async placeMarketOrder(params: OrderParams): Promise<ExecutionResult> {
-        if (!this.page) throw new Error("Browser not initialized");
+    async placeMarketOrder(params: OrderParams, isRetry: boolean = false): Promise<ExecutionResult> {
+        if (!this.page) {
+            if (isRetry) {
+                return { success: false, error: "Browser not initialized after restart" };
+            }
+            console.log("⚠️  Browser not initialized. Attempting to restart...");
+            await this.restartBrowser();
+            return this.placeMarketOrder(params, true);
+        }
 
         console.log(`\n${"═".repeat(60)}`);
-        console.log(`📤 PLACING MARKET ORDER`);
+        console.log(`📤 PLACING MARKET ORDER${isRetry ? ' (RETRY)' : ''}`);
         console.log(`${"═".repeat(60)}`);
         console.log(`   Direction: ${params.direction}`);
         console.log(`   Quantity: ${params.quantity}`);
@@ -628,6 +729,19 @@ export class TradingViewClient {
 
         } catch (error) {
             const errorMsg = error instanceof Error ? error.message : String(error);
+
+            // Check if this is a recoverable CDP error and we haven't retried yet
+            const isCDPError = errorMsg.includes('detached Frame') ||
+                errorMsg.includes('Protocol error') ||
+                errorMsg.includes('Target closed') ||
+                errorMsg.includes('Session closed');
+
+            if (isCDPError && !isRetry) {
+                console.log("\n⚠️  CDP error during order placement. Restarting browser and retrying...");
+                await this.restartBrowser();
+                return this.placeMarketOrder(params, true);
+            }
+
             console.error(`❌ Order placement failed: ${errorMsg}`);
             return { success: false, error: errorMsg };
         }
