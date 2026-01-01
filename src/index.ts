@@ -294,6 +294,7 @@ app.post("/execute-consensus", async (req: Request, res: Response) => {
                 stopLoss: tradeSetup.stopLoss,
                 takeProfit: tradeSetup.takeProfit1,
             },
+            executionDetails: result.executionDetails || null,
             error: result.error,
             timestamp: new Date().toISOString(),
         });

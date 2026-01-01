@@ -541,7 +541,7 @@ export class TradingViewClient {
                 if (tpInput) {
                     await tpInput.click({ clickCount: 3 });
                     await this.delay(100);
-                    await tpInput.type(params.takeProfit.toFixed(2), { delay: 100 });
+                    await tpInput.type(params.takeProfit.toFixed(2), { delay: 150 });
                 }
                 await this.delay(300);
             }
@@ -560,7 +560,7 @@ export class TradingViewClient {
                 if (slInput) {
                     await slInput.click({ clickCount: 3 });
                     await this.delay(100);
-                    await slInput.type(params.stopLoss.toFixed(2), { delay: 100 });
+                    await slInput.type(params.stopLoss.toFixed(2), { delay: 300 });
                 }
                 await this.delay(300);
             }
