@@ -9,6 +9,16 @@
  */
 
 import puppeteer, { Browser, Page } from "puppeteer";
+import * as fs from "fs";
+import * as path from "path";
+import { fileURLToPath } from "url";
+
+// ES module __dirname equivalent
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Session file path (stored in executor directory)
+const SESSION_PATH = path.join(__dirname, "..", "tradingview-session.json");
 
 export interface TradingViewConfig {
     email: string;
@@ -18,10 +28,28 @@ export interface TradingViewConfig {
 }
 
 export interface OrderParams {
+    symbol?: string;
     direction: "LONG" | "SHORT";
     quantity: number;
     stopLoss?: number;
     takeProfit?: number;
+}
+
+export interface ExecutionDetails {
+    symbol: string;
+    side: "LONG" | "SHORT";
+    entryPrice: number;
+    quantity: number;
+    marginUsed: number;
+    takeProfit?: number;
+    stopLoss?: number;
+    timestamp: string;
+}
+
+export interface ExecutionResult {
+    success: boolean;
+    error?: string;
+    executionDetails?: ExecutionDetails;
 }
 
 export class TradingViewClient {
@@ -54,7 +82,16 @@ export class TradingViewClient {
             },
         });
 
-        this.page = await this.browser.newPage();
+        // Get the existing page (Puppeteer opens with one blank page)
+        const pages = await this.browser.pages();
+        this.page = pages[0] || await this.browser.newPage();
+
+        // Try to load existing session cookies
+        const sessionData = this.loadSession();
+        if (sessionData) {
+            console.log("📂 Found existing session, restoring cookies...");
+            await this.page.setCookie(...sessionData.cookies);
+        }
 
         // Set user agent to avoid detection
         await this.page.setUserAgent(
@@ -67,21 +104,111 @@ export class TradingViewClient {
     }
 
     /**
+     * Load session from disk
+     */
+    private loadSession(): { cookies: any[] } | null {
+        try {
+            if (fs.existsSync(SESSION_PATH)) {
+                const data = fs.readFileSync(SESSION_PATH, "utf-8");
+                const session = JSON.parse(data);
+                console.log(`   Session file found (saved: ${session.savedAt})`);
+                return session;
+            }
+        } catch (e) {
+            console.log("   Could not load session file");
+        }
+        return null;
+    }
+
+    /**
+     * Save session to disk
+     */
+    private async saveSession(): Promise<void> {
+        if (!this.page) return;
+        try {
+            const cookies = await this.page.cookies();
+            const session = {
+                cookies,
+                savedAt: new Date().toISOString()
+            };
+            fs.writeFileSync(SESSION_PATH, JSON.stringify(session, null, 2));
+            console.log("💾 Session saved to disk");
+        } catch (e) {
+            console.log("⚠️  Could not save session");
+        }
+    }
+
+    /**
+     * Check if already logged in by looking for user menu button
+     */
+    private async checkIfLoggedIn(): Promise<boolean> {
+        if (!this.page) return false;
+
+        try {
+            // Navigate to signin page to check status
+            await this.page.goto("https://www.tradingview.com/accounts/signin/", {
+                waitUntil: "networkidle2",
+                timeout: 30000,
+            });
+
+            await this.delay(2000);
+
+            // Check for user menu button (logged in state)
+            const userMenuButton = await this.page.$(
+                '.tv-header__user-menu-button--logged, [data-name="header-user-menu-button"], button[aria-label="Open user menu"]'
+            );
+
+            if (userMenuButton) {
+                console.log("✅ Already logged in (session restored)!");
+                return true;
+            }
+
+            // Also check if we were redirected to home page with logged in state
+            const currentUrl = this.page.url();
+            if (!currentUrl.includes('/accounts/signin')) {
+                // We were redirected, check for user menu on current page
+                const userMenu = await this.page.$(
+                    '.tv-header__user-menu-button--logged, [data-name="header-user-menu-button"]'
+                );
+                if (userMenu) {
+                    console.log("✅ Already logged in (redirected from signin)!");
+                    return true;
+                }
+            }
+
+            return false;
+        } catch (e) {
+            console.log("   Error checking login status");
+            return false;
+        }
+    }
+
+    /**
      * Login to TradingView
      */
     private async login(): Promise<void> {
         if (!this.page) throw new Error("Browser not initialized");
 
-        console.log("🔐 Logging into TradingView...");
+        console.log("🔐 Checking TradingView login status...");
 
-        // Navigate to TradingView login
-        await this.page.goto("https://www.tradingview.com/accounts/signin/", {
-            waitUntil: "networkidle2",
-            timeout: 30000,
-        });
+        // First check if we're already logged in from saved session
+        const alreadyLoggedIn = await this.checkIfLoggedIn();
+        if (alreadyLoggedIn) {
+            this.isLoggedIn = true;
+            return;
+        }
 
-        // Wait for page to load
-        await this.delay(2000);
+        console.log("   Session expired or not found, performing fresh login...");
+
+        // Navigate to TradingView login (we're already there from checkIfLoggedIn, but ensure we're on signin)
+        const currentUrl = this.page.url();
+        if (!currentUrl.includes('/accounts/signin')) {
+            await this.page.goto("https://www.tradingview.com/accounts/signin/", {
+                waitUntil: "networkidle2",
+                timeout: 30000,
+            });
+            await this.delay(2000);
+        }
 
         // Click "Email" button to show email login form
         try {
@@ -155,6 +282,9 @@ export class TradingViewClient {
 
                 console.log("✅ Continuing with login...");
                 this.isLoggedIn = true;
+
+                // Save session for future use (after CAPTCHA solved)
+                await this.saveSession();
                 return;
             } catch (e) {
                 console.log("⚠️  Captcha timeout. Continuing anyway...");
@@ -169,6 +299,9 @@ export class TradingViewClient {
             await this.page.waitForSelector('[data-name="header-user-menu-button"], .tv-header__user-menu-button', { timeout: 15000 });
             console.log("✅ Login successful!");
             this.isLoggedIn = true;
+
+            // Save session for future use
+            await this.saveSession();
         } catch (e) {
             console.log("⚠️  Could not verify login. Continuing anyway...");
             this.isLoggedIn = true; // Assume success and continue
@@ -319,7 +452,7 @@ export class TradingViewClient {
     /**
      * Place a market order with optional TP/SL
      */
-    async placeMarketOrder(params: OrderParams): Promise<{ success: boolean; error?: string }> {
+    async placeMarketOrder(params: OrderParams): Promise<ExecutionResult> {
         if (!this.page) throw new Error("Browser not initialized");
 
         console.log(`\n${"═".repeat(60)}`);
@@ -374,6 +507,7 @@ export class TradingViewClient {
             await this.delay(500);
 
             // 2.5. Set margin amount if auto-sizing
+            let actualQuantity = params.quantity;
             if (useMarginMode && marginAmount > 0) {
                 console.log(`   Setting margin to $${marginAmount.toFixed(2)}...`);
                 const marginInput = await this.page.$('#quantity-calculation-field');
@@ -382,7 +516,15 @@ export class TradingViewClient {
                     await this.delay(100);
                     await marginInput.type(marginAmount.toFixed(2), { delay: 100 });
                 }
-                await this.delay(300);
+                await this.delay(500);
+
+                // Read the actual quantity that was auto-calculated
+                const quantityText = await this.page.evaluate(() => {
+                    const qtyInput = document.querySelector('#quantity-field') as HTMLInputElement;
+                    return qtyInput?.value || '0';
+                });
+                actualQuantity = parseFloat(quantityText.replace(/,/g, ''));
+                console.log(`   Auto-calculated quantity: ${actualQuantity} contracts`);
             }
 
             // 3. Set Take Profit if provided
@@ -427,12 +569,41 @@ export class TradingViewClient {
             console.log("   Clicking Place Order button...");
             await this.page.waitForSelector('button[data-name="place-and-modify-button"]', { timeout: 5000 });
             await this.page.click('button[data-name="place-and-modify-button"]');
-            await this.delay(2000);
+
+            // Wait for order to fill and position to appear
+            console.log("   Waiting for order to fill...");
+            await this.delay(3000);
+
+            // Read average fill price from positions table
+            const avgFillPrice = await this.page.evaluate(() => {
+                const avgFillCell = document.querySelector('td[data-label="Avg Fill Price"] span');
+                return avgFillCell?.textContent || null;
+            });
+
+            let entryPrice = 0;
+            if (avgFillPrice) {
+                entryPrice = parseFloat(avgFillPrice.replace(/,/g, ''));
+                console.log(`   Average fill price: $${entryPrice}`);
+            } else {
+                console.log("   Could not read avg fill price from positions table");
+            }
 
             console.log(`\n✅ Order placed successfully!`);
             console.log(`${"═".repeat(60)}\n`);
 
-            return { success: true };
+            return {
+                success: true,
+                executionDetails: {
+                    symbol: params.symbol || "ETHUSDT",
+                    side: params.direction,
+                    entryPrice,
+                    quantity: actualQuantity,
+                    marginUsed: marginAmount,
+                    takeProfit: params.takeProfit,
+                    stopLoss: params.stopLoss,
+                    timestamp: new Date().toISOString()
+                }
+            };
 
         } catch (error) {
             const errorMsg = error instanceof Error ? error.message : String(error);
