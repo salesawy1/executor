@@ -402,6 +402,7 @@ export class TradingViewClient {
 
     /**
      * Ensure session is connected, handling multiple potential disconnect modals
+     * and broker disconnection scenarios
      */
     private async ensureConnection(): Promise<void> {
         if (!this.page) return;
@@ -424,7 +425,7 @@ export class TradingViewClient {
 
             if (!disconnectType) {
                 if (i > 0) console.log("✅ Connection verified/restored.");
-                return; // All good
+                break; // Exit modal loop, but continue to broker check
             }
 
             console.log(`⚠️  Disconnect detected (${disconnectType}). Attempt ${i + 1}/3 to reconnect...`);
@@ -445,9 +446,29 @@ export class TradingViewClient {
                 await this.delay(1000);
             }
         }
-        console.log("❌ Failed to fully restore connection after 3 attempts. Proceeding anyway...");
-    }
 
+        // After clearing modals, check if we need to reconnect to the Paper Trading broker
+        // This happens when we're logged in but disconnected from the broker session
+        const paperBrokerCard = await this.page.$('[data-broker="Paper"]');
+        if (paperBrokerCard) {
+            console.log("⚠️  Paper Trading broker disconnected. Reconnecting...");
+            try {
+                await paperBrokerCard.click();
+                await this.delay(1000);
+
+                // Click the Connect button to confirm broker connection
+                const loginBtn = await this.page.$('button[name="broker-login-submit-button"]');
+                if (loginBtn) {
+                    console.log("   Clicking broker connect button...");
+                    await loginBtn.click();
+                    await this.delay(2000);
+                }
+                console.log("✅ Paper Trading broker reconnected!");
+            } catch (e) {
+                console.log("⚠️  Could not reconnect Paper Trading broker automatically.");
+            }
+        }
+    }
 
     /**
      * Place a market order with optional TP/SL
