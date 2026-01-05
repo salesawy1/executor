@@ -21,10 +21,12 @@ dotenv.config();
 
 const PORT = process.env.PORT || 3001;
 
+export const IS_ALT = true;
+
 // TradingView credentials
-const tvEmail = process.env.TRADINGVIEW_EMAIL;
-const tvPassword = process.env.TRADINGVIEW_PASSWORD;
-const tvChartUrl = process.env.TRADINGVIEW_CHART_URL || "https://www.tradingview.com/chart/2hWy6ct3/?symbol=MEXC%3AETHUSDT.P";
+const tvEmail = IS_ALT ? process.env.TRADINGVIEW_EMAIL_ALT : process.env.TRADINGVIEW_EMAIL;
+const tvPassword = IS_ALT ? process.env.TRADINGVIEW_PASSWORD_ALT : process.env.TRADINGVIEW_PASSWORD;
+const tvChartUrl = (IS_ALT ? process.env.TRADINGVIEW_CHART_URL_ALT : process.env.TRADINGVIEW_CHART_URL) || "https://www.tradingview.com/chart/2hWy6ct3/?symbol=MEXC%3AETHUSDT.P";
 const headless = process.env.HEADLESS === "true";
 
 // Parse CLI args for test mode

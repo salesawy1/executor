@@ -12,6 +12,7 @@ import puppeteer, { Browser, Page } from "puppeteer";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
+import { IS_ALT } from './index.js';
 
 // ES module __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
@@ -108,7 +109,7 @@ export class TradingViewClient {
      */
     private loadSession(): { cookies: any[] } | null {
         try {
-            if (fs.existsSync(SESSION_PATH)) {
+            if (!IS_ALT && fs.existsSync(SESSION_PATH)) {
                 const data = fs.readFileSync(SESSION_PATH, "utf-8");
                 const session = JSON.parse(data);
                 console.log(`   Session file found (saved: ${session.savedAt})`);
