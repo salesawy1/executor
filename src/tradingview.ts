@@ -332,6 +332,9 @@ export class TradingViewClient {
         } catch (e) {
             console.log("⚠️  Could not verify chart load. Continuing...");
         }
+
+        // Dismiss any promotion modals that might appear on page load
+        await this.dismissPromotionModal();
     }
 
     /**
@@ -589,6 +592,9 @@ export class TradingViewClient {
         try {
             // Ensure we are connected before trying to interact
             await this.ensureConnection();
+
+            // Dismiss any promotion modals that might block order placement
+            await this.dismissPromotionModal();
 
             // Ensure order form is open
             await this.openOrderForm();
@@ -854,6 +860,28 @@ export class TradingViewClient {
      */
     private delay(ms: number): Promise<void> {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /**
+     * Dismiss any promotion/sale modal that might appear
+     * TradingView sometimes shows promotional popups for sales
+     */
+    private async dismissPromotionModal(): Promise<void> {
+        if (!this.page) return;
+
+        try {
+            // Check for promotion modal (e.g., "Hello 2026 sale" popup)
+            // The modal has class 'modal-AIyNn2YU' and a close button with class 'closeButton-AIyNn2YU'
+            const closeButton = await this.page.$('.closeButton-AIyNn2YU, button.closeButton-AIyNn2YU, .closeButtonWrapper-AIyNn2YU button');
+            if (closeButton) {
+                console.log("📢 Promotion modal detected, dismissing...");
+                await closeButton.click();
+                await this.delay(500);
+                console.log("   ✅ Promotion modal closed");
+            }
+        } catch (e) {
+            // Modal not present or already closed, continue silently
+        }
     }
 }
 
