@@ -21,7 +21,7 @@ dotenv.config();
 
 const PORT = process.env.PORT || 3001;
 
-export const IS_ALT = true;
+export const IS_ALT = false;
 
 // TradingView credentials
 const tvEmail = IS_ALT ? process.env.TRADINGVIEW_EMAIL_ALT : process.env.TRADINGVIEW_EMAIL;
