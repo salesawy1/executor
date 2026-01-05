@@ -710,6 +710,32 @@ export class TradingViewClient {
                 console.log("   Could not read avg fill price from positions table");
             }
 
+            // Read actual filled quantity from positions table (more accurate than pre-fill estimate)
+            const filledQty = await this.page.evaluate(() => {
+                const qtyCell = document.querySelector('td[data-label="Qty"] .cellContent-pnigL71h');
+                return qtyCell?.textContent || null;
+            });
+
+            if (filledQty) {
+                actualQuantity = parseFloat(filledQty.replace(/,/g, ''));
+                console.log(`   Actual filled quantity: ${actualQuantity} contracts`);
+            } else {
+                console.log("   Could not read actual qty from positions table, using estimate");
+            }
+
+            // Read actual margin from positions table (more accurate than pre-fill estimate)
+            const actualMargin = await this.page.evaluate(() => {
+                const marginCell = document.querySelector('td[data-label="Margin"] .cellContent-pnigL71h span span:first-child');
+                return marginCell?.textContent || null;
+            });
+
+            if (actualMargin) {
+                marginAmount = parseFloat(actualMargin.replace(/,/g, ''));
+                console.log(`   Actual margin used: $${marginAmount.toLocaleString()}`);
+            } else {
+                console.log("   Could not read actual margin from positions table, using estimate");
+            }
+
             console.log(`\n✅ Order placed successfully!`);
             console.log(`${"═".repeat(60)}\n`);
 
