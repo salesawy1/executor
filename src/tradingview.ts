@@ -723,17 +723,43 @@ export class TradingViewClient {
                 console.log("   Could not read actual qty from positions table, using estimate");
             }
 
-            // Read actual margin from positions table (more accurate than pre-fill estimate)
+            // Read actual margin from Order History table (more accurate than positions table)
+            console.log("   Reading margin from Order History...");
+
+            // Click on Order History tab
+            const orderHistoryTab = await this.page.$('button#history');
+            if (orderHistoryTab) {
+                await orderHistoryTab.click();
+                await this.delay(1500); // Wait longer for table to load
+            } else {
+                console.log("   ⚠️ Could not find Order History tab");
+            }
+
+            // Find the first row with Type "Market" and extract the margin
             const actualMargin = await this.page.evaluate(() => {
-                const marginCell = document.querySelector('td[data-label="Margin"] .cellContent-pnigL71h span span:first-child');
-                return marginCell?.textContent || null;
+                const rows = Array.from(document.querySelectorAll('tr.ka-tr.ka-row'));
+                for (const row of rows) {
+                    const typeCell = row.querySelector('td[data-label="Type"] .cellContent-pnigL71h');
+                    if (typeCell?.textContent?.trim() === 'Market') {
+                        const marginCell = row.querySelector('td[data-label="Margin"] .cellContent-pnigL71h span span:first-child');
+                        return marginCell?.textContent || null;
+                    }
+                }
+                return null;
             });
 
             if (actualMargin) {
                 marginAmount = parseFloat(actualMargin.replace(/,/g, ''));
                 console.log(`   Actual margin used: $${marginAmount.toLocaleString()}`);
             } else {
-                console.log("   Could not read actual margin from positions table, using estimate");
+                console.log("   Could not read actual margin from Order History, using estimate");
+            }
+
+            // Go back to Positions tab
+            const positionsTab = await this.page.$('button#positions');
+            if (positionsTab) {
+                await positionsTab.click();
+                await this.delay(500);
             }
 
             console.log(`\n✅ Order placed successfully!`);
