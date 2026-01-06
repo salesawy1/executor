@@ -701,7 +701,7 @@ export class TradingViewClient {
 
             // Wait for order to fill and position to appear
             console.log("   Waiting for order to fill...");
-            await this.delay(3000);
+            await this.delay(5000);
 
             // Read average fill price from positions table
             const avgFillPrice = await this.page.evaluate(() => {
