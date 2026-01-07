@@ -18,9 +18,6 @@ import { IS_ALT } from './index.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Session file path (stored in executor directory)
-const SESSION_PATH = path.join(__dirname, "..", "tradingview-session.json");
-
 export interface TradingViewConfig {
     email: string;
     password: string;
@@ -68,10 +65,15 @@ export class TradingViewClient {
      * Initialize browser and login to TradingView
      */
     async initialize(): Promise<void> {
-        console.log("🚀 Launching browser...");
+        console.log(`🚀 Launching browser (${IS_ALT ? 'ALT' : 'MAIN'} profile)...`);
+
+        // Use separate Chrome profiles for main vs alt accounts
+        // This isolates all cookies, localStorage, cache - no logout needed when switching
+        const profileDir = path.join(__dirname, "..", ".chrome-profiles", IS_ALT ? "alt" : "main");
 
         this.browser = await puppeteer.launch({
             headless: this.config.headless ?? false, // Default to visible for debugging
+            userDataDir: profileDir, // Separate profile per account
             args: [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
@@ -87,11 +89,24 @@ export class TradingViewClient {
         const pages = await this.browser.pages();
         this.page = pages[0] || await this.browser.newPage();
 
-        // Try to load existing session cookies
+        // Try to load existing session (cookies + localStorage)
         const sessionData = this.loadSession();
         if (sessionData) {
-            console.log("📂 Found existing session, restoring cookies...");
+            console.log("📂 Found existing session, restoring...");
             await this.page.setCookie(...sessionData.cookies);
+
+            // Navigate to TradingView first to set localStorage on same origin
+            await this.page.goto('https://www.tradingview.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+            // Restore localStorage if present
+            if (sessionData.localStorage) {
+                await this.page.evaluate((data) => {
+                    for (const [key, value] of Object.entries(data)) {
+                        window.localStorage.setItem(key, value as string);
+                    }
+                }, sessionData.localStorage);
+                console.log("   ✅ Restored localStorage");
+            }
         }
 
         // Set user agent to avoid detection
@@ -107,12 +122,15 @@ export class TradingViewClient {
     /**
      * Load session from disk
      */
-    private loadSession(): { cookies: any[] } | null {
+    private loadSession(): { cookies: any[]; localStorage?: Record<string, string> } | null {
         try {
-            if (!IS_ALT && fs.existsSync(SESSION_PATH)) {
+            // Session file path (stored in executor directory)
+            const SESSION_PATH = path.join(__dirname, "..", IS_ALT ? "tradingview-alt-session.json" : "tradingview-session.json");
+
+            if (fs.existsSync(SESSION_PATH)) {
                 const data = fs.readFileSync(SESSION_PATH, "utf-8");
                 const session = JSON.parse(data);
-                console.log(`   Session file found (saved: ${session.savedAt})`);
+                console.log(` ${IS_ALT ? "Alt" : "Main"} Session file found (saved: ${session.savedAt})`);
                 return session;
             }
         } catch (e) {
@@ -122,20 +140,37 @@ export class TradingViewClient {
     }
 
     /**
-     * Save session to disk
+     * Save session to disk (cookies + localStorage)
      */
     private async saveSession(): Promise<void> {
         if (!this.page) return;
+        // Session file path (stored in executor directory)
+        const SESSION_PATH = path.join(__dirname, "..", IS_ALT ? "tradingview-alt-session.json" : "tradingview-session.json");
+
         try {
             const cookies = await this.page.cookies();
+
+            // Also save localStorage (contains auth tokens!)
+            const localStorageData = await this.page.evaluate(() => {
+                const data: Record<string, string> = {};
+                for (let i = 0; i < window.localStorage.length; i++) {
+                    const key = window.localStorage.key(i);
+                    if (key) {
+                        data[key] = window.localStorage.getItem(key) || '';
+                    }
+                }
+                return data;
+            });
+
             const session = {
                 cookies,
+                localStorage: localStorageData,
                 savedAt: new Date().toISOString()
             };
             fs.writeFileSync(SESSION_PATH, JSON.stringify(session, null, 2));
-            console.log("💾 Session saved to disk");
+            console.log(` ${IS_ALT ? "Alt" : "Main"} Session saved to disk (cookies + localStorage)`);
         } catch (e) {
-            console.log("⚠️  Could not save session");
+            console.log(` ${IS_ALT ? "Alt" : "Main"} Could not save session:`, e);
         }
     }
 
@@ -525,7 +560,7 @@ export class TradingViewClient {
                 break; // Exit modal loop, but continue to broker check
             }
 
-            console.log(`⚠️  Disconnect detected (${disconnectType}). Attempt ${i + 1}/3 to reconnect...`);
+            console.log(`⚠️  Disconnect detected(${disconnectType}).Attempt ${i + 1}/3 to reconnect...`);
 
             // Try all known reconnect buttons
             // 1. Session ended buttons (.wrapperButton..., .button-Z0...)
