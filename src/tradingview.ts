@@ -48,6 +48,7 @@ export interface ExecutionResult {
     success: boolean;
     error?: string;
     executionDetails?: ExecutionDetails;
+    executionLogs?: string[];
 }
 
 export class TradingViewClient {
@@ -607,22 +608,29 @@ export class TradingViewClient {
      * Will automatically restart browser and retry once if CDP connection is lost.
      */
     async placeMarketOrder(params: OrderParams, isRetry: boolean = false): Promise<ExecutionResult> {
+        // Log capture array - will be returned with result
+        const logs: string[] = [];
+        const log = (msg: string) => {
+            logs.push(msg);
+            console.log(msg);
+        };
+
         if (!this.page) {
             if (isRetry) {
-                return { success: false, error: "Browser not initialized after restart" };
+                return { success: false, error: "Browser not initialized after restart", executionLogs: logs };
             }
-            console.log("⚠️  Browser not initialized. Attempting to restart...");
+            log("⚠️  Browser not initialized. Attempting to restart...");
             await this.restartBrowser();
             return this.placeMarketOrder(params, true);
         }
 
-        console.log(`\n${"═".repeat(60)}`);
-        console.log(`📤 PLACING MARKET ORDER${isRetry ? ' (RETRY)' : ''}`);
-        console.log(`${"═".repeat(60)}`);
-        console.log(`   Direction: ${params.direction}`);
-        console.log(`   Quantity: ${params.quantity}`);
-        if (params.stopLoss) console.log(`   Stop Loss: $${params.stopLoss}`);
-        if (params.takeProfit) console.log(`   Take Profit: $${params.takeProfit}`);
+        log(`\n${"═".repeat(60)}`);
+        log(`📤 PLACING MARKET ORDER${isRetry ? ' (RETRY)' : ''}`);
+        log(`${"═".repeat(60)}`);
+        log(`   Direction: ${params.direction}`);
+        log(`   Quantity: ${params.quantity}`);
+        if (params.stopLoss) log(`   Stop Loss: $${params.stopLoss}`);
+        if (params.takeProfit) log(`   Take Profit: $${params.takeProfit}`);
 
         try {
             // Ensure we are connected before trying to interact
@@ -632,6 +640,7 @@ export class TradingViewClient {
             await this.dismissPromotionModal();
 
             // Ensure order form is open
+            log("📝 Opening order form...");
             await this.openOrderForm();
 
             // Handle auto-margin sizing if quantity is -1
@@ -639,7 +648,7 @@ export class TradingViewClient {
             let marginAmount = 0;
 
             if (useMarginMode) {
-                console.log("   📊 Auto-sizing position from equity...");
+                log("   📊 Auto-sizing position from equity...");
 
                 // Read equity from the account summary
                 const equityText = await this.page.evaluate(() => {
@@ -650,8 +659,8 @@ export class TradingViewClient {
                 const equity = parseFloat(equityText.replace(/,/g, ''));
                 marginAmount = Math.floor(equity * 0.9 * 100) / 100; // 90% of equity, rounded to 2 decimals
 
-                console.log(`   Equity: $${equity.toLocaleString()}`);
-                console.log(`   Using 90% margin: $${marginAmount.toLocaleString()}`);
+                log(`   Equity: $${equity.toLocaleString()}`);
+                log(`   Using 90% margin: $${marginAmount.toLocaleString()}`);
             }
 
             // 1. Click the direction button FIRST (Buy or Sell)
@@ -659,13 +668,13 @@ export class TradingViewClient {
                 ? '[data-name="side-control-buy"]'
                 : '[data-name="side-control-sell"]';
 
-            console.log(`   Clicking ${params.direction === "LONG" ? "BUY" : "SELL"} side...`);
+            log(`   Clicking ${params.direction === "LONG" ? "BUY" : "SELL"} side...`);
             await this.page.waitForSelector(sideSelector, { timeout: 5000 });
             await this.page.click(sideSelector);
             await this.delay(500);
 
             // 2. Select Market order type (switch from Limit)
-            console.log("   Selecting Market order type...");
+            log("   Selecting Market order type...");
             await this.page.waitForSelector('button#Market', { timeout: 5000 });
             await this.page.click('button#Market');
             await this.delay(500);
@@ -673,7 +682,7 @@ export class TradingViewClient {
             // 2.5. Set margin amount if auto-sizing
             let actualQuantity = params.quantity;
             if (useMarginMode && marginAmount > 0) {
-                console.log(`   Setting margin to $${marginAmount.toFixed(2)}...`);
+                log(`   Setting margin to $${marginAmount.toFixed(2)}...`);
                 const marginInput = await this.page.$('#quantity-calculation-field');
                 if (marginInput) {
                     await marginInput.click({ clickCount: 3 });
@@ -688,19 +697,19 @@ export class TradingViewClient {
                     return qtyInput?.value || '0';
                 });
                 actualQuantity = parseFloat(quantityText.replace(/,/g, ''));
-                console.log(`   Auto-calculated quantity: ${actualQuantity} contracts`);
+                log(`   Auto-calculated quantity: ${actualQuantity} contracts`);
             }
 
             // 3. Set Take Profit if provided
             if (params.takeProfit) {
-                console.log("   Enabling take profit...");
+                log("   Enabling take profit...");
                 const tpCheckbox = await this.page.$('input[data-qa-id="order-ticket-profit-checkbox-bracket"]');
                 if (tpCheckbox) {
                     await tpCheckbox.click();
                     await this.delay(300);
                 }
 
-                console.log(`   Setting take profit to ${params.takeProfit.toFixed(2)}...`);
+                log(`   Setting take profit to ${params.takeProfit.toFixed(2)}...`);
                 const tpInput = await this.page.$('#take-profit-price-field');
                 if (tpInput) {
                     await tpInput.click({ clickCount: 3 });
@@ -712,14 +721,14 @@ export class TradingViewClient {
 
             // 4. Set Stop Loss if provided
             if (params.stopLoss) {
-                console.log("   Enabling stop loss...");
+                log("   Enabling stop loss...");
                 const slCheckbox = await this.page.$('input[data-qa-id="order-ticket-loss-checkbox-bracket"]');
                 if (slCheckbox) {
                     await slCheckbox.click();
                     await this.delay(300);
                 }
 
-                console.log(`   Setting stop loss to ${params.stopLoss.toFixed(2)}...`);
+                log(`   Setting stop loss to ${params.stopLoss.toFixed(2)}...`);
                 const slInput = await this.page.$('#stop-loss-price-field');
                 if (slInput) {
                     await slInput.click({ clickCount: 3 });
@@ -730,12 +739,12 @@ export class TradingViewClient {
             }
 
             // 5. Click the Place Order button
-            console.log("   Clicking Place Order button...");
+            log("   Clicking Place Order button...");
             await this.page.waitForSelector('button[data-name="place-and-modify-button"]', { timeout: 5000 });
             await this.page.click('button[data-name="place-and-modify-button"]');
 
             // Wait for order to fill and position to appear
-            console.log("   Waiting for order to fill...");
+            log("   Waiting for order to fill...");
             await this.delay(5000);
 
             // Read average fill price from positions table
@@ -747,9 +756,9 @@ export class TradingViewClient {
             let entryPrice = 0;
             if (avgFillPrice) {
                 entryPrice = parseFloat(avgFillPrice.replace(/,/g, ''));
-                console.log(`   Average fill price: $${entryPrice}`);
+                log(`   Average fill price: $${entryPrice}`);
             } else {
-                console.log("   Could not read avg fill price from positions table");
+                log("   Could not read avg fill price from positions table");
             }
 
             // Read actual filled quantity from positions table (more accurate than pre-fill estimate)
@@ -760,13 +769,13 @@ export class TradingViewClient {
 
             if (filledQty) {
                 actualQuantity = parseFloat(filledQty.replace(/,/g, ''));
-                console.log(`   Actual filled quantity: ${actualQuantity} contracts`);
+                log(`   Actual filled quantity: ${actualQuantity} contracts`);
             } else {
-                console.log("   Could not read actual qty from positions table, using estimate");
+                log("   Could not read actual qty from positions table, using estimate");
             }
 
             // Read actual margin from Order History table (more accurate than positions table)
-            console.log("   Reading margin from Order History...");
+            log("   Reading margin from Order History...");
 
             // Click on Order History tab
             const orderHistoryTab = await this.page.$('button#history');
@@ -774,7 +783,7 @@ export class TradingViewClient {
                 await orderHistoryTab.click();
                 await this.delay(1500); // Wait longer for table to load
             } else {
-                console.log("   ⚠️ Could not find Order History tab");
+                log("   ⚠️ Could not find Order History tab");
             }
 
             // Find the first row with Type "Market" and extract the margin
@@ -792,9 +801,9 @@ export class TradingViewClient {
 
             if (actualMargin) {
                 marginAmount = parseFloat(actualMargin.replace(/,/g, ''));
-                console.log(`   Actual margin used: $${marginAmount.toLocaleString()}`);
+                log(`   Actual margin used: $${marginAmount.toLocaleString()}`);
             } else {
-                console.log("   Could not read actual margin from Order History, using estimate");
+                log("   Could not read actual margin from Order History, using estimate");
             }
 
             // Go back to Positions tab
@@ -804,8 +813,8 @@ export class TradingViewClient {
                 await this.delay(500);
             }
 
-            console.log(`\n✅ Order placed successfully!`);
-            console.log(`${"═".repeat(60)}\n`);
+            log(`\n✅ Order placed successfully!`);
+            log(`${"═".repeat(60)}\n`);
 
             return {
                 success: true,
@@ -818,7 +827,8 @@ export class TradingViewClient {
                     takeProfit: params.takeProfit,
                     stopLoss: params.stopLoss,
                     timestamp: new Date().toISOString()
-                }
+                },
+                executionLogs: logs
             };
 
         } catch (error) {
@@ -831,13 +841,13 @@ export class TradingViewClient {
                 errorMsg.includes('Session closed');
 
             if (isCDPError && !isRetry) {
-                console.log("\n⚠️  CDP error during order placement. Restarting browser and retrying...");
+                log("\n⚠️  CDP error during order placement. Restarting browser and retrying...");
                 await this.restartBrowser();
                 return this.placeMarketOrder(params, true);
             }
 
-            console.error(`❌ Order placement failed: ${errorMsg}`);
-            return { success: false, error: errorMsg };
+            log(`❌ Order placement failed: ${errorMsg}`);
+            return { success: false, error: errorMsg, executionLogs: logs };
         }
     }
 
