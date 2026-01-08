@@ -1232,6 +1232,75 @@ export class TradingViewClient {
     }
 
     /**
+     * Check if there's an open position
+     * Returns position details if exists, null otherwise
+     */
+    async hasOpenPosition(): Promise<{
+        hasPosition: boolean;
+        position?: {
+            symbol: string;
+            side: string;
+            qty: string;
+            avgPrice: string;
+            pnl: string;
+        };
+    }> {
+        if (!this.page) {
+            return { hasPosition: false };
+        }
+
+        try {
+            // Ensure connection is valid
+            await this.ensureConnection();
+
+            // Click on positions tab to check
+            const posTab = await this.page.$('button#positions');
+            if (posTab) {
+                await posTab.click();
+                await this.delay(1000);
+            }
+
+            // Check if there are any open positions by looking for rows with data-row-id
+            const existingPosition = await this.page.evaluate(() => {
+                const positionsContainer = document.querySelector('div[data-account-manager-page-id="positions"]');
+                const root = positionsContainer || document;
+
+                const positionRows = root.querySelectorAll('tr.ka-tr.ka-row[data-row-id]');
+                if (positionRows.length === 0) {
+                    return null;
+                }
+
+                const firstRow = positionRows[0];
+                const symbolCell = firstRow.querySelector('td[data-label="Symbol"]');
+                const sideCell = firstRow.querySelector('td[data-label="Side"]');
+                const qtyCell = firstRow.querySelector('td[data-label="Qty"]');
+                const avgPriceCell = firstRow.querySelector('td[data-label="Avg Fill Price"]');
+                const pnlCell = firstRow.querySelector('td[data-label="Unrealized P&L"]');
+
+                return {
+                    symbol: symbolCell?.textContent?.trim() || 'unknown',
+                    side: sideCell?.textContent?.trim() || 'unknown',
+                    qty: qtyCell?.textContent?.trim() || 'unknown',
+                    avgPrice: avgPriceCell?.textContent?.trim() || 'unknown',
+                    pnl: pnlCell?.textContent?.trim() || 'unknown'
+                };
+            });
+
+            if (existingPosition) {
+                return {
+                    hasPosition: true,
+                    position: existingPosition
+                };
+            }
+
+            return { hasPosition: false };
+        } catch (error) {
+            console.error("Error checking position:", error);
+            return { hasPosition: false };
+        }
+    }
+
+    /**
      * Check if client is ready for trading
      */
     isReady(): boolean {

@@ -95,6 +95,33 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 /**
+ * Check for Open Position
+ * Used by scheduler to determine if consensus should be triggered
+ */
+app.get("/check-position", async (_req: Request, res: Response) => {
+    try {
+        await initializeClient();
+
+        if (!tvClient?.isReady()) {
+            res.status(503).json({
+                hasPosition: false,
+                error: "TradingView client not ready",
+            });
+            return;
+        }
+
+        const result = await tvClient.hasOpenPosition();
+        res.json(result);
+    } catch (error) {
+        console.error("Error checking position:", error);
+        res.status(500).json({
+            hasPosition: false,
+            error: error instanceof Error ? error.message : String(error),
+        });
+    }
+});
+
+/**
  * Take Screenshot
  */
 app.get("/screenshot", async (_req: Request, res: Response) => {
@@ -395,6 +422,7 @@ app.listen(PORT, async () => {
   
   📡 Endpoints:
      GET  /health            - Health check
+     GET  /check-position    - Check for open position
      GET  /screenshot        - Take screenshot
      POST /trade             - Execute a trade
      POST /execute-consensus - Execute from trade_execution.json
