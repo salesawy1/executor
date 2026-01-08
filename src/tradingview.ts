@@ -661,8 +661,12 @@ export class TradingViewClient {
             // Check if there are any open positions by looking for rows with data-row-id
             // Based on actual HTML: <tr class="ka-tr ka-row" data-row-id="BYBIT:ETHUSDT.P">
             const existingPosition = await this.page.evaluate(() => {
+                // Scope search to the positions tab container to avoid selecting hidden rows from other tabs
+                const positionsContainer = document.querySelector('div[data-account-manager-page-id="positions"]');
+                const root = positionsContainer || document;
+
                 // Most reliable: check for position rows with data-row-id attribute
-                const positionRows = document.querySelectorAll('tr.ka-tr.ka-row[data-row-id]');
+                const positionRows = root.querySelectorAll('tr.ka-tr.ka-row[data-row-id]');
                 if (positionRows.length === 0) {
                     return null;
                 }
