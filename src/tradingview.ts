@@ -610,8 +610,13 @@ export class TradingViewClient {
     async placeMarketOrder(params: OrderParams, isRetry: boolean = false): Promise<ExecutionResult> {
         // Log capture array - will be returned with result
         const logs: string[] = [];
+        const startTime = Date.now();
+
         const log = (msg: string) => {
-            logs.push(msg);
+            const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+            const timestamp = new Date().toISOString();
+            const logLine = `[${timestamp}] [+${elapsed}s] ${msg}`;
+            logs.push(logLine);
             console.log(msg);
         };
 
@@ -631,17 +636,25 @@ export class TradingViewClient {
         log(`   Quantity: ${params.quantity}`);
         if (params.stopLoss) log(`   Stop Loss: $${params.stopLoss}`);
         if (params.takeProfit) log(`   Take Profit: $${params.takeProfit}`);
+        log(`   Page URL: ${this.page.url()}`);
 
         try {
             // Ensure we are connected before trying to interact
+            log("🔗 Checking connection status...");
             await this.ensureConnection();
+            log("   Connection verified");
 
             // Dismiss any promotion modals that might block order placement
+            log("🔍 Checking for promotion modals...");
             await this.dismissPromotionModal();
 
             // Ensure order form is open
             log("📝 Opening order form...");
+            const orderFormBefore = await this.page.$('[data-name="side-control-buy"], [data-name="side-control-sell"]');
+            log(`   Order form visible before: ${orderFormBefore ? 'YES' : 'NO'}`);
             await this.openOrderForm();
+            const orderFormAfter = await this.page.$('[data-name="side-control-buy"], [data-name="side-control-sell"]');
+            log(`   Order form visible after: ${orderFormAfter ? 'YES' : 'NO'}`);
 
             // Handle auto-margin sizing if quantity is -1
             let useMarginMode = params.quantity < 0;
@@ -651,15 +664,21 @@ export class TradingViewClient {
                 log("   📊 Auto-sizing position from equity...");
 
                 // Read equity from the account summary
-                const equityText = await this.page.evaluate(() => {
+                const equityRaw = await this.page.evaluate(() => {
                     const equityElement = document.querySelector('.accountSummaryField-tWnxJF90 .value-tWnxJF90');
-                    return equityElement?.textContent || '0';
+                    return {
+                        text: equityElement?.textContent || '0',
+                        exists: !!equityElement,
+                        className: equityElement?.className || 'N/A'
+                    };
                 });
+                log(`   [DOM] Equity element found: ${equityRaw.exists}`);
+                log(`   [DOM] Equity raw text: "${equityRaw.text}"`);
 
-                const equity = parseFloat(equityText.replace(/,/g, ''));
+                const equity = parseFloat(equityRaw.text.replace(/,/g, ''));
                 marginAmount = Math.floor(equity * 0.9 * 100) / 100; // 90% of equity, rounded to 2 decimals
 
-                log(`   Equity: $${equity.toLocaleString()}`);
+                log(`   Equity parsed: $${equity.toLocaleString()}`);
                 log(`   Using 90% margin: $${marginAmount.toLocaleString()}`);
             }
 
@@ -669,151 +688,404 @@ export class TradingViewClient {
                 : '[data-name="side-control-sell"]';
 
             log(`   Clicking ${params.direction === "LONG" ? "BUY" : "SELL"} side...`);
-            await this.page.waitForSelector(sideSelector, { timeout: 5000 });
+            log(`   [DOM] Selector: ${sideSelector}`);
+            const sideBtn = await this.page.waitForSelector(sideSelector, { timeout: 5000 });
+            const sideBtnState = await this.page.evaluate((sel) => {
+                const el = document.querySelector(sel) as HTMLElement;
+                return {
+                    exists: !!el,
+                    classList: el?.className || 'N/A',
+                    ariaChecked: el?.getAttribute('aria-checked') || 'N/A'
+                };
+            }, sideSelector);
+            log(`   [DOM] Button class: ${sideBtnState.classList.substring(0, 50)}...`);
+            log(`   [DOM] aria-checked before click: ${sideBtnState.ariaChecked}`);
             await this.page.click(sideSelector);
             await this.delay(500);
+            log(`   Side button clicked ✓`);
 
             // 2. Select Market order type (switch from Limit)
             log("   Selecting Market order type...");
+            log(`   [DOM] Selector: button#Market`);
             await this.page.waitForSelector('button#Market', { timeout: 5000 });
+            const marketBtnState = await this.page.evaluate(() => {
+                const el = document.querySelector('button#Market') as HTMLElement;
+                return {
+                    exists: !!el,
+                    ariaSelected: el?.getAttribute('aria-selected') || 'N/A',
+                    innerText: el?.innerText || 'N/A'
+                };
+            });
+            log(`   [DOM] Market button text: "${marketBtnState.innerText}"`);
+            log(`   [DOM] aria-selected before: ${marketBtnState.ariaSelected}`);
             await this.page.click('button#Market');
             await this.delay(500);
+            log(`   Market order type selected ✓`);
 
             // 2.5. Set margin amount if auto-sizing
             let actualQuantity = params.quantity;
             if (useMarginMode && marginAmount > 0) {
                 log(`   Setting margin to $${marginAmount.toFixed(2)}...`);
+                log(`   [DOM] Selector: #quantity-calculation-field`);
                 const marginInput = await this.page.$('#quantity-calculation-field');
                 if (marginInput) {
+                    log(`   [DOM] Margin input found, clicking to select...`);
                     await marginInput.click({ clickCount: 3 });
                     await this.delay(100);
+                    log(`   [DOM] Typing margin value: ${marginAmount.toFixed(2)}`);
                     await marginInput.type(marginAmount.toFixed(2), { delay: 100 });
+                } else {
+                    log(`   ⚠️ [DOM] Margin input NOT found!`);
                 }
                 await this.delay(500);
 
                 // Read the actual quantity that was auto-calculated
-                const quantityText = await this.page.evaluate(() => {
+                const qtyRaw = await this.page.evaluate(() => {
                     const qtyInput = document.querySelector('#quantity-field') as HTMLInputElement;
-                    return qtyInput?.value || '0';
+                    return {
+                        value: qtyInput?.value || '0',
+                        exists: !!qtyInput
+                    };
                 });
-                actualQuantity = parseFloat(quantityText.replace(/,/g, ''));
+                log(`   [DOM] Quantity field found: ${qtyRaw.exists}`);
+                log(`   [DOM] Quantity field value: "${qtyRaw.value}"`);
+                actualQuantity = parseFloat(qtyRaw.value.replace(/,/g, ''));
                 log(`   Auto-calculated quantity: ${actualQuantity} contracts`);
             }
 
             // 3. Set Take Profit if provided
             if (params.takeProfit) {
                 log("   Enabling take profit...");
+                log(`   [DOM] Selector: input[data-qa-id="order-ticket-profit-checkbox-bracket"]`);
                 const tpCheckbox = await this.page.$('input[data-qa-id="order-ticket-profit-checkbox-bracket"]');
                 if (tpCheckbox) {
+                    const tpCheckedBefore = await this.page.evaluate(() => {
+                        const cb = document.querySelector('input[data-qa-id="order-ticket-profit-checkbox-bracket"]') as HTMLInputElement;
+                        return cb?.checked;
+                    });
+                    log(`   [DOM] TP checkbox checked before: ${tpCheckedBefore}`);
                     await tpCheckbox.click();
                     await this.delay(300);
+                    log(`   TP checkbox clicked ✓`);
+                } else {
+                    log(`   ⚠️ [DOM] TP checkbox NOT found!`);
                 }
 
                 log(`   Setting take profit to ${params.takeProfit.toFixed(2)}...`);
+                log(`   [DOM] Selector: #take-profit-price-field`);
                 const tpInput = await this.page.$('#take-profit-price-field');
                 if (tpInput) {
+                    log(`   [DOM] TP input found, clicking to select...`);
                     await tpInput.click({ clickCount: 3 });
                     await this.delay(100);
+                    log(`   [DOM] Typing TP value: ${params.takeProfit.toFixed(2)}`);
                     await tpInput.type(params.takeProfit.toFixed(2), { delay: 150 });
+                    // Read back
+                    const tpReadBack = await this.page.evaluate(() => {
+                        const input = document.querySelector('#take-profit-price-field') as HTMLInputElement;
+                        return input?.value || 'N/A';
+                    });
+                    log(`   [DOM] TP read-back value: "${tpReadBack}"`);
+                } else {
+                    log(`   ⚠️ [DOM] TP input NOT found!`);
                 }
                 await this.delay(300);
+                log(`   Take profit set ✓`);
             }
 
             // 4. Set Stop Loss if provided
             if (params.stopLoss) {
                 log("   Enabling stop loss...");
+                log(`   [DOM] Selector: input[data-qa-id="order-ticket-loss-checkbox-bracket"]`);
                 const slCheckbox = await this.page.$('input[data-qa-id="order-ticket-loss-checkbox-bracket"]');
                 if (slCheckbox) {
+                    const slCheckedBefore = await this.page.evaluate(() => {
+                        const cb = document.querySelector('input[data-qa-id="order-ticket-loss-checkbox-bracket"]') as HTMLInputElement;
+                        return cb?.checked;
+                    });
+                    log(`   [DOM] SL checkbox checked before: ${slCheckedBefore}`);
                     await slCheckbox.click();
                     await this.delay(300);
+                    log(`   SL checkbox clicked ✓`);
+                } else {
+                    log(`   ⚠️ [DOM] SL checkbox NOT found!`);
                 }
 
                 log(`   Setting stop loss to ${params.stopLoss.toFixed(2)}...`);
+                log(`   [DOM] Selector: #stop-loss-price-field`);
                 const slInput = await this.page.$('#stop-loss-price-field');
                 if (slInput) {
+                    log(`   [DOM] SL input found, clicking to select...`);
                     await slInput.click({ clickCount: 3 });
                     await this.delay(100);
+                    log(`   [DOM] Typing SL value: ${params.stopLoss.toFixed(2)}`);
                     await slInput.type(params.stopLoss.toFixed(2), { delay: 300 });
+                    // Read back
+                    const slReadBack = await this.page.evaluate(() => {
+                        const input = document.querySelector('#stop-loss-price-field') as HTMLInputElement;
+                        return input?.value || 'N/A';
+                    });
+                    log(`   [DOM] SL read-back value: "${slReadBack}"`);
+                } else {
+                    log(`   ⚠️ [DOM] SL input NOT found!`);
                 }
                 await this.delay(300);
+                log(`   Stop loss set ✓`);
             }
 
             // 5. Click the Place Order button
             log("   Clicking Place Order button...");
-            await this.page.waitForSelector('button[data-name="place-and-modify-button"]', { timeout: 5000 });
+            log(`   [DOM] Selector: button[data-name="place-and-modify-button"]`);
+            const placeBtn = await this.page.waitForSelector('button[data-name="place-and-modify-button"]', { timeout: 5000 });
+            const placeBtnState = await this.page.evaluate(() => {
+                const btn = document.querySelector('button[data-name="place-and-modify-button"]') as HTMLButtonElement;
+                return {
+                    exists: !!btn,
+                    disabled: btn?.disabled,
+                    innerText: btn?.innerText || 'N/A'
+                };
+            });
+            log(`   [DOM] Place button text: "${placeBtnState.innerText}"`);
+            log(`   [DOM] Place button disabled: ${placeBtnState.disabled}`);
             await this.page.click('button[data-name="place-and-modify-button"]');
+            log(`   Place Order button clicked ✓`);
 
             // Wait for order to fill and position to appear
-            log("   Waiting for order to fill...");
+            log("   Waiting for order to fill (5 seconds)...");
             await this.delay(5000);
+            log("   Wait complete, reading results...");
 
-            // Read average fill price from positions table
-            const avgFillPrice = await this.page.evaluate(() => {
-                const avgFillCell = document.querySelector('td[data-label="Avg Fill Price"] span');
-                return avgFillCell?.textContent || null;
+            // === COMPREHENSIVE POSITION TABLE DEBUGGING ===
+            log("   ═══ POSITION TABLE DIAGNOSTICS ═══");
+
+            // First, check what tab we're on
+            const currentTab = await this.page.evaluate(() => {
+                const tabs = document.querySelectorAll('button[role="tab"]');
+                const activeTab = Array.from(tabs).find(t => t.getAttribute('aria-selected') === 'true');
+                return activeTab?.id || activeTab?.textContent || 'unknown';
             });
+            log(`   [DOM] Current active tab: "${currentTab}"`);
 
-            let entryPrice = 0;
-            if (avgFillPrice) {
-                entryPrice = parseFloat(avgFillPrice.replace(/,/g, ''));
-                log(`   Average fill price: $${entryPrice}`);
-            } else {
-                log("   Could not read avg fill price from positions table");
+            // Click positions tab explicitly to make sure we're on it
+            log(`   [DOM] Clicking positions tab to ensure we're on it...`);
+            const posTabClick = await this.page.$('button#positions');
+            if (posTabClick) {
+                await posTabClick.click();
+                await this.delay(1000);
+                log(`   [DOM] Positions tab clicked, waited 1s`);
             }
 
-            // Read actual filled quantity from positions table (more accurate than pre-fill estimate)
-            const filledQty = await this.page.evaluate(() => {
-                const qtyCell = document.querySelector('td[data-label="Qty"] .cellContent-pnigL71h');
-                return qtyCell?.textContent || null;
+            // Dump ALL table cells and their data-labels
+            const tableDump = await this.page.evaluate(() => {
+                const cells = document.querySelectorAll('td[data-label]');
+                const dump: Array<{ label: string, text: string, html: string }> = [];
+                cells.forEach(cell => {
+                    dump.push({
+                        label: cell.getAttribute('data-label') || 'no-label',
+                        text: cell.textContent?.trim() || '',
+                        html: cell.innerHTML.substring(0, 200)
+                    });
+                });
+                return dump;
+            });
+            log(`   [DOM] Found ${tableDump.length} table cells with data-label`);
+            for (const cell of tableDump) {
+                log(`   [DOM] Cell label="${cell.label}" text="${cell.text}"`);
+            }
+
+            // Try multiple selectors for avg fill price
+            const avgFillSelectors = [
+                'td[data-label="Avg Fill Price"] span',
+                'td[data-label="Avg Fill Price"]',
+                'td[data-label="Avg. Fill Price"] span',
+                'td[data-label="Entry Price"] span',
+                'td[data-label="Price"] span',
+                '.positions-table span[class*="price"]',
+            ];
+
+            log(`   [DOM] Trying multiple selectors for avg fill price:`);
+            let foundAvgFill: string | null = null;
+            for (const sel of avgFillSelectors) {
+                const result = await this.page.evaluate((selector) => {
+                    const el = document.querySelector(selector);
+                    return {
+                        exists: !!el,
+                        text: el?.textContent?.trim() || null,
+                        html: el?.outerHTML?.substring(0, 150) || null
+                    };
+                }, sel);
+                log(`   [DOM] Selector "${sel}": exists=${result.exists}, text="${result.text}"`);
+                if (result.exists && result.text && !foundAvgFill) {
+                    foundAvgFill = result.text;
+                }
+            }
+
+            // Also try to get the first position row's data
+            const positionRowData = await this.page.evaluate(() => {
+                // Try to find position rows
+                const rows = document.querySelectorAll('tr.ka-tr, tr[class*="position"]');
+                if (rows.length === 0) {
+                    return { rowCount: 0, data: {} };
+                }
+
+                const firstRow = rows[0];
+                const cells = firstRow.querySelectorAll('td');
+                const data: Record<string, string> = {};
+                cells.forEach(cell => {
+                    const label = cell.getAttribute('data-label');
+                    const text = cell.textContent?.trim() || '';
+                    if (label) {
+                        data[label] = text;
+                    }
+                });
+
+                return {
+                    rowCount: rows.length,
+                    rowClasses: firstRow.className,
+                    rowHTML: firstRow.outerHTML.substring(0, 500),
+                    data
+                };
             });
 
-            if (filledQty) {
-                actualQuantity = parseFloat(filledQty.replace(/,/g, ''));
+            log(`   [DOM] Position rows found: ${positionRowData.rowCount}`);
+            if (positionRowData.rowClasses) {
+                log(`   [DOM] First row classes: "${positionRowData.rowClasses}"`);
+            }
+            if (positionRowData.data) {
+                log(`   [DOM] First row data:`);
+                for (const [key, val] of Object.entries(positionRowData.data)) {
+                    log(`   [DOM]   ${key}: "${val}"`);
+                }
+            }
+
+            // Now read the avg fill price with the standard selector
+            log(`   [DOM] Final read with: td[data-label="Avg Fill Price"] span`);
+            const avgFillRaw = await this.page.evaluate(() => {
+                const avgFillCell = document.querySelector('td[data-label="Avg Fill Price"] span');
+                return {
+                    text: avgFillCell?.textContent || null,
+                    exists: !!avgFillCell,
+                    parentHTML: avgFillCell?.parentElement?.outerHTML?.substring(0, 300) || null
+                };
+            });
+            log(`   [DOM] Avg Fill element found: ${avgFillRaw.exists}`);
+            log(`   [DOM] Avg Fill raw text: "${avgFillRaw.text}"`);
+            if (avgFillRaw.parentHTML) {
+                log(`   [DOM] Parent HTML: ${avgFillRaw.parentHTML}`);
+            }
+
+            let entryPrice = 0;
+            if (avgFillRaw.text) {
+                entryPrice = parseFloat(avgFillRaw.text.replace(/,/g, ''));
+                log(`   Average fill price parsed: $${entryPrice}`);
+            } else if (foundAvgFill) {
+                entryPrice = parseFloat(foundAvgFill.replace(/[^0-9.]/g, ''));
+                log(`   ⚠️ Used fallback selector, parsed: $${entryPrice}`);
+            } else {
+                log("   ❌ FAILED to read avg fill price from ANY selector!");
+                // Try to get ANY price from the position row data
+                const priceKeys = ['Avg Fill Price', 'Entry Price', 'Price', 'Avg. Fill'];
+                const rowData = positionRowData.data as Record<string, string>;
+                for (const key of priceKeys) {
+                    if (rowData && rowData[key]) {
+                        const parsed = parseFloat(rowData[key].replace(/[^0-9.]/g, ''));
+                        if (parsed > 0) {
+                            entryPrice = parsed;
+                            log(`   [RECOVERY] Found price via row data key "${key}": $${entryPrice}`);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            log(`   ═══ END POSITION TABLE DIAGNOSTICS ═══`);
+
+            // Read actual filled quantity from positions table (more accurate than pre-fill estimate)
+            log(`   [DOM] Reading filled qty from: td[data-label="Qty"] .cellContent-pnigL71h`);
+            const filledQtyRaw = await this.page.evaluate(() => {
+                const qtyCell = document.querySelector('td[data-label="Qty"] .cellContent-pnigL71h');
+                return {
+                    text: qtyCell?.textContent || null,
+                    exists: !!qtyCell
+                };
+            });
+            log(`   [DOM] Qty element found: ${filledQtyRaw.exists}`);
+            log(`   [DOM] Qty raw text: "${filledQtyRaw.text}"`);
+
+            if (filledQtyRaw.text) {
+                actualQuantity = parseFloat(filledQtyRaw.text.replace(/,/g, ''));
                 log(`   Actual filled quantity: ${actualQuantity} contracts`);
             } else {
-                log("   Could not read actual qty from positions table, using estimate");
+                log("   ⚠️ Could not read actual qty from positions table, using estimate");
             }
 
             // Read actual margin from Order History table (more accurate than positions table)
             log("   Reading margin from Order History...");
+            log(`   [DOM] Clicking Order History tab: button#history`);
 
             // Click on Order History tab
             const orderHistoryTab = await this.page.$('button#history');
             if (orderHistoryTab) {
                 await orderHistoryTab.click();
+                log(`   Order History tab clicked, waiting 1.5s for table load...`);
                 await this.delay(1500); // Wait longer for table to load
+                log(`   Table load wait complete`);
             } else {
-                log("   ⚠️ Could not find Order History tab");
+                log("   ⚠️ [DOM] Could not find Order History tab (button#history)");
             }
 
             // Find the first row with Type "Market" and extract the margin
-            const actualMargin = await this.page.evaluate(() => {
+            log(`   [DOM] Searching for Market order row in tr.ka-tr.ka-row`);
+            const marginResult = await this.page.evaluate(() => {
                 const rows = Array.from(document.querySelectorAll('tr.ka-tr.ka-row'));
+                const results: string[] = [];
                 for (const row of rows) {
                     const typeCell = row.querySelector('td[data-label="Type"] .cellContent-pnigL71h');
-                    if (typeCell?.textContent?.trim() === 'Market') {
+                    const typeText = typeCell?.textContent?.trim() || 'N/A';
+                    results.push(`Row Type: "${typeText}"`);
+                    if (typeText === 'Market') {
                         const marginCell = row.querySelector('td[data-label="Margin"] .cellContent-pnigL71h span span:first-child');
-                        return marginCell?.textContent || null;
+                        return {
+                            found: true,
+                            marginText: marginCell?.textContent || null,
+                            rowTypes: results
+                        };
                     }
                 }
-                return null;
+                return { found: false, marginText: null, rowTypes: results };
             });
 
-            if (actualMargin) {
-                marginAmount = parseFloat(actualMargin.replace(/,/g, ''));
+            log(`   [DOM] Rows scanned: ${marginResult.rowTypes.length}`);
+            for (const rt of marginResult.rowTypes.slice(0, 5)) {
+                log(`   [DOM] ${rt}`);
+            }
+            if (marginResult.rowTypes.length > 5) {
+                log(`   [DOM] ... and ${marginResult.rowTypes.length - 5} more rows`);
+            }
+            log(`   [DOM] Market row found: ${marginResult.found}`);
+            log(`   [DOM] Margin raw text: "${marginResult.marginText}"`);
+
+            if (marginResult.marginText) {
+                marginAmount = parseFloat(marginResult.marginText.replace(/,/g, ''));
                 log(`   Actual margin used: $${marginAmount.toLocaleString()}`);
             } else {
-                log("   Could not read actual margin from Order History, using estimate");
+                log("   ⚠️ Could not read actual margin from Order History, using estimate");
             }
 
             // Go back to Positions tab
+            log(`   [DOM] Clicking Positions tab: button#positions`);
             const positionsTab = await this.page.$('button#positions');
             if (positionsTab) {
                 await positionsTab.click();
                 await this.delay(500);
+                log(`   Positions tab clicked ✓`);
+            } else {
+                log(`   ⚠️ [DOM] Could not find Positions tab`);
             }
 
+            const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
             log(`\n✅ Order placed successfully!`);
+            log(`   Total execution time: ${totalTime}s`);
             log(`${"═".repeat(60)}\n`);
 
             return {
