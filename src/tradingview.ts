@@ -648,6 +648,67 @@ export class TradingViewClient {
             log("🔍 Checking for promotion modals...");
             await this.dismissPromotionModal();
 
+            // === CHECK FOR EXISTING OPEN POSITIONS ===
+            log("📋 Checking for existing open positions...");
+
+            // Click on positions tab to check
+            const posTab = await this.page.$('button#positions');
+            if (posTab) {
+                await posTab.click();
+                await this.delay(1000);
+            }
+
+            // Check if there are any open positions by looking for rows with data-row-id
+            // Based on actual HTML: <tr class="ka-tr ka-row" data-row-id="BYBIT:ETHUSDT.P">
+            const existingPosition = await this.page.evaluate(() => {
+                // Most reliable: check for position rows with data-row-id attribute
+                const positionRows = document.querySelectorAll('tr.ka-tr.ka-row[data-row-id]');
+                if (positionRows.length === 0) {
+                    return null;
+                }
+
+                // Get details from the first position row
+                const firstRow = positionRows[0];
+                const rowId = firstRow.getAttribute('data-row-id') || 'unknown';
+
+                // Use exact data-label attributes from the HTML
+                const symbolCell = firstRow.querySelector('td[data-label="Symbol"]');
+                const sideCell = firstRow.querySelector('td[data-label="Side"]');
+                const qtyCell = firstRow.querySelector('td[data-label="Qty"]');
+                const avgPriceCell = firstRow.querySelector('td[data-label="Avg Fill Price"]');
+                const pnlCell = firstRow.querySelector('td[data-label="Unrealized P&L"]');
+
+                return {
+                    count: positionRows.length,
+                    rowId,
+                    symbol: symbolCell?.textContent?.trim() || 'unknown',
+                    side: sideCell?.textContent?.trim() || 'unknown',
+                    qty: qtyCell?.textContent?.trim() || 'unknown',
+                    avgPrice: avgPriceCell?.textContent?.trim() || 'unknown',
+                    pnl: pnlCell?.textContent?.trim() || 'unknown'
+                };
+            });
+
+            if (existingPosition && existingPosition.count > 0) {
+                log(`   ⚠️ EXISTING POSITION DETECTED!`);
+                log(`   [POSITION] Row ID: ${existingPosition.rowId}`);
+                log(`   [POSITION] Symbol: ${existingPosition.symbol}`);
+                log(`   [POSITION] Side: ${existingPosition.side}`);
+                log(`   [POSITION] Qty: ${existingPosition.qty}`);
+                log(`   [POSITION] Avg Price: ${existingPosition.avgPrice}`);
+                log(`   [POSITION] Unrealized P&L: ${existingPosition.pnl}`);
+                log(`   ❌ ORDER BLOCKED: Cannot place new order while position is open`);
+                log(`${"═".repeat(60)}\n`);
+
+                return {
+                    success: false,
+                    error: `Existing position detected: ${existingPosition.side} ${existingPosition.qty} @ ${existingPosition.avgPrice} (P&L: ${existingPosition.pnl}). Close the existing position before placing a new order.`,
+                    executionLogs: logs
+                };
+            } else {
+                log(`   ✓ No existing positions detected, proceeding with order`);
+            }
+
             // Ensure order form is open
             log("📝 Opening order form...");
             const orderFormBefore = await this.page.$('[data-name="side-control-buy"], [data-name="side-control-sell"]');
@@ -1001,11 +1062,12 @@ export class TradingViewClient {
             log(`   ═══ END POSITION TABLE DIAGNOSTICS ═══`);
 
             // Read actual filled quantity from positions table (more accurate than pre-fill estimate)
-            log(`   [DOM] Reading filled qty from: td[data-label="Qty"] .cellContent-pnigL71h`);
+            log(`   [DOM] Reading filled qty from: td[data-label="Qty"]`);
             const filledQtyRaw = await this.page.evaluate(() => {
-                const qtyCell = document.querySelector('td[data-label="Qty"] .cellContent-pnigL71h');
+                // Based on HTML: <td data-label="Qty"><div class="ka-cell-text cellContent-...">246.861</div></td>
+                const qtyCell = document.querySelector('td[data-label="Qty"]');
                 return {
-                    text: qtyCell?.textContent || null,
+                    text: qtyCell?.textContent?.trim() || null,
                     exists: !!qtyCell
                 };
             });
