@@ -912,12 +912,72 @@ export class TradingViewClient {
             });
             log(`   [DOM] Place button text: "${placeBtnState.innerText}"`);
             log(`   [DOM] Place button disabled: ${placeBtnState.disabled}`);
+
             await this.page.click('button[data-name="place-and-modify-button"]');
             log(`   Place Order button clicked ✓`);
 
-            // Wait for order to fill and position to appear
-            log("   Waiting for order to fill (5 seconds)...");
-            await this.delay(5000);
+            // Wait for order to fill while watching for rejection toasts
+            // Poll every 500ms for 10 seconds total
+            log("   Waiting for order to fill (10 seconds, watching for rejections)...");
+            const waitStartTime = Date.now();
+            const totalWaitMs = 10000;
+            const pollIntervalMs = 500;
+            let rejectionDetected = false;
+            let rejectionMessage = "";
+
+            while (Date.now() - waitStartTime < totalWaitMs) {
+                // Check for rejection toast
+                const rejection = await this.page.evaluate(() => {
+                    // Look for the rejection toast container
+                    const toastContainer = document.querySelector('.contentContainerWrapper-zMOxH_8U');
+                    if (!toastContainer) return null;
+
+                    // Check if this is an order rejection
+                    const header = toastContainer.querySelector('.header-zMOxH_8U');
+                    const headerText = header?.textContent?.trim() || '';
+
+                    if (headerText.includes('rejected') || headerText.includes('Rejected')) {
+                        // Get the rejection reason
+                        const content = toastContainer.querySelector('.content-MMDBBz2U');
+                        const orderInfo = toastContainer.querySelector('.orderInfo-MMDBBz2U');
+                        const symbol = toastContainer.querySelector('.tag-text-rVj4hiuX');
+
+                        return {
+                            isRejection: true,
+                            header: headerText,
+                            orderInfo: orderInfo?.textContent?.trim() || '',
+                            reason: content?.textContent?.trim() || 'Unknown rejection reason',
+                            symbol: symbol?.textContent?.trim() || ''
+                        };
+                    }
+                    return null;
+                });
+
+                if (rejection) {
+                    rejectionDetected = true;
+                    rejectionMessage = `${rejection.header} - ${rejection.orderInfo}: ${rejection.reason}`;
+                    log(`   ⚠️ ORDER REJECTION DETECTED!`);
+                    log(`   [REJECTION] Header: ${rejection.header}`);
+                    log(`   [REJECTION] Order: ${rejection.orderInfo}`);
+                    log(`   [REJECTION] Reason: ${rejection.reason}`);
+                    log(`   [REJECTION] Symbol: ${rejection.symbol}`);
+                    break;
+                }
+
+                await this.delay(pollIntervalMs);
+            }
+
+            // If rejection was detected, return failure immediately
+            if (rejectionDetected) {
+                log(`   ❌ Order was rejected by the exchange`);
+                log(`${"═".repeat(60)}\n`);
+                return {
+                    success: false,
+                    error: `Order rejected: ${rejectionMessage}`,
+                    executionLogs: logs
+                };
+            }
+
             log("   Wait complete, reading results...");
 
             // === COMPREHENSIVE POSITION TABLE DEBUGGING ===
@@ -1111,14 +1171,18 @@ export class TradingViewClient {
                     results.push(`Row Type: "${typeText}"`);
                     if (typeText === 'Market') {
                         const marginCell = row.querySelector('td[data-label="Margin"] .cellContent-pnigL71h span span:first-child');
+                        const placingTimeCell = row.querySelector('td[data-label="Placing Time"]');
+                        const sideCell = row.querySelector('td[data-label="Side"]');
                         return {
                             found: true,
                             marginText: marginCell?.textContent || null,
+                            placingTime: placingTimeCell?.textContent?.trim() || null,
+                            side: sideCell?.textContent?.trim() || null,
                             rowTypes: results
                         };
                     }
                 }
-                return { found: false, marginText: null, rowTypes: results };
+                return { found: false, marginText: null, placingTime: null, side: null, rowTypes: results };
             });
 
             log(`   [DOM] Rows scanned: ${marginResult.rowTypes.length}`);
@@ -1130,12 +1194,35 @@ export class TradingViewClient {
             }
             log(`   [DOM] Market row found: ${marginResult.found}`);
             log(`   [DOM] Margin raw text: "${marginResult.marginText}"`);
+            log(`   [DOM] Market order placing time: "${marginResult.placingTime}"`);
+            log(`   [DOM] Market order side: "${marginResult.side}"`);
 
             if (marginResult.marginText) {
                 marginAmount = parseFloat(marginResult.marginText.replace(/,/g, ''));
                 log(`   Actual margin used: $${marginAmount.toLocaleString()}`);
             } else {
                 log("   ⚠️ Could not read actual margin from Order History, using estimate");
+            }
+
+            // Check if the Market order in Order History is recent (within last 60 seconds)
+            // This helps us determine if a NEW order was placed vs reading stale data
+            let isMarketOrderRecent = false;
+            if (marginResult.placingTime) {
+                try {
+                    // Format from TradingView: "2026-01-08 19:41:53"
+                    const orderTime = new Date(marginResult.placingTime.replace(' ', 'T') + 'Z');
+                    const now = new Date();
+                    const ageSeconds = (now.getTime() - orderTime.getTime()) / 1000;
+                    log(`   [DOM] Market order age: ${ageSeconds.toFixed(1)} seconds`);
+                    isMarketOrderRecent = ageSeconds < 60; // Consider "recent" if within last 60 seconds
+                    if (isMarketOrderRecent) {
+                        log(`   ✓ Market order is recent (placed within last 60s)`);
+                    } else {
+                        log(`   ⚠️ Market order appears stale (older than 60s)`);
+                    }
+                } catch (e) {
+                    log(`   ⚠️ Could not parse Market order time: ${e}`);
+                }
             }
 
             // Go back to Positions tab
@@ -1150,6 +1237,38 @@ export class TradingViewClient {
             }
 
             const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
+
+            // === CRITICAL VALIDATION: Check if order actually executed ===
+            // Only fail if BOTH conditions are true:
+            // 1. entryPrice is 0 (no position in Positions tab)
+            // 2. No recent Market order in Order History (order wasn't placed)
+            if (entryPrice === 0 && !isMarketOrderRecent) {
+                log(`\n❌ ORDER EXECUTION FAILED!`);
+                log(`   Entry price is 0 - no position was created`);
+                log(`   No recent Market order found in Order History`);
+                log(`   The order button was clicked but no order was placed on the exchange`);
+                log(`   This may be due to:`);
+                log(`   - TradingView Paper Trading glitch`);
+                log(`   - Rapid position close/open timing issue`);
+                log(`   - Exchange connectivity problems`);
+                log(`   Total execution time: ${totalTime}s`);
+                log(`${"═".repeat(60)}\n`);
+
+                return {
+                    success: false,
+                    error: `Order failed: No position created (entry price = 0) and no recent Market order in Order History. The order button was clicked but no order was placed.`,
+                    executionLogs: logs
+                };
+            }
+
+            // If entryPrice is 0 but we found a recent Market order, log a warning but don't fail
+            // This could mean the position was immediately closed or there's a display timing issue
+            if (entryPrice === 0 && isMarketOrderRecent) {
+                log(`\n⚠️ WARNING: Entry price is 0 but a recent Market order was found`);
+                log(`   This could indicate the position was filled but UI hasn't updated yet`);
+                log(`   Or the position was immediately closed by TP/SL`);
+            }
+
             log(`\n✅ Order placed successfully!`);
             log(`   Total execution time: ${totalTime}s`);
             log(`${"═".repeat(60)}\n`);
