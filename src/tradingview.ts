@@ -907,25 +907,167 @@ export class TradingViewClient {
                 return {
                     exists: !!btn,
                     disabled: btn?.disabled,
-                    innerText: btn?.innerText || 'N/A'
+                    innerText: btn?.innerText || 'N/A',
+                    className: btn?.className || 'N/A'
                 };
             });
             log(`   [DOM] Place button text: "${placeBtnState.innerText}"`);
             log(`   [DOM] Place button disabled: ${placeBtnState.disabled}`);
+            log(`   [DOM] Place button class: "${placeBtnState.className}"`);
 
+            // === DEBUG SETUP: Create debug directory and file ===
+            const debugTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const tpPrice = params.takeProfit ? `TP${params.takeProfit}` : 'noTP';
+            const debugDir = path.join(__dirname, '..', 'debug_logs');
+            const debugFileName = `order_debug_${debugTimestamp}_${tpPrice}.txt`;
+            const debugFilePath = path.join(debugDir, debugFileName);
+
+            // Ensure debug directory exists
+            if (!fs.existsSync(debugDir)) {
+                fs.mkdirSync(debugDir, { recursive: true });
+            }
+
+            const debugLines: string[] = [];
+            const debugLog = (msg: string) => {
+                const line = `[${new Date().toISOString()}] ${msg}`;
+                debugLines.push(line);
+                log(msg); // Also add to regular logs
+            };
+
+            debugLog(`=== ORDER DEBUG START ===`);
+            debugLog(`Direction: ${params.direction}`);
+            debugLog(`Take Profit: ${params.takeProfit}`);
+            debugLog(`Stop Loss: ${params.stopLoss}`);
+
+            // === SCREENSHOT #1: Order form BEFORE clicking ===
+            const screenshotDir = path.join(debugDir, 'screenshots');
+            if (!fs.existsSync(screenshotDir)) {
+                fs.mkdirSync(screenshotDir, { recursive: true });
+            }
+            const screenshotBefore = path.join(screenshotDir, `${debugTimestamp}_${tpPrice}_01_before_click.png`);
+            try {
+                await this.page.screenshot({ path: screenshotBefore, fullPage: false });
+                debugLog(`[SCREENSHOT] Before click saved: ${screenshotBefore}`);
+            } catch (e) {
+                debugLog(`[SCREENSHOT] Failed to save before screenshot: ${e}`);
+            }
+
+            // === DUMP ORDER FORM STATE ===
+            const orderFormState = await this.page.evaluate(() => {
+                const marginInput = document.querySelector('#quantity-calculation-field') as HTMLInputElement;
+                const qtyInput = document.querySelector('input[data-qa-id="order-ticket-qty-input"]') as HTMLInputElement;
+                const tpInput = document.querySelector('#take-profit-price-field') as HTMLInputElement;
+                const slInput = document.querySelector('#stop-loss-price-field') as HTMLInputElement;
+
+                return {
+                    margin: marginInput?.value || 'N/A',
+                    qty: qtyInput?.value || 'N/A',
+                    tp: tpInput?.value || 'N/A',
+                    sl: slInput?.value || 'N/A'
+                };
+            });
+            debugLog(`[ORDER FORM] Margin: ${orderFormState.margin}`);
+            debugLog(`[ORDER FORM] Qty: ${orderFormState.qty}`);
+            debugLog(`[ORDER FORM] TP: ${orderFormState.tp}`);
+            debugLog(`[ORDER FORM] SL: ${orderFormState.sl}`);
+
+            // === CLICK THE BUTTON ===
             await this.page.click('button[data-name="place-and-modify-button"]');
             log(`   Place Order button clicked ✓`);
+            debugLog(`[CLICK] Place Order button clicked at ${new Date().toISOString()}`);
+
+            // === CHECK BUTTON STATE IMMEDIATELY AFTER CLICK (500ms) ===
+            await this.delay(500);
+            const placeBtnStateAfter = await this.page.evaluate(() => {
+                const btn = document.querySelector('button[data-name="place-and-modify-button"]') as HTMLButtonElement;
+                return {
+                    exists: !!btn,
+                    disabled: btn?.disabled,
+                    innerText: btn?.innerText || 'N/A',
+                    className: btn?.className || 'N/A'
+                };
+            });
+            debugLog(`[BUTTON AFTER 500ms] Text: "${placeBtnStateAfter.innerText}"`);
+            debugLog(`[BUTTON AFTER 500ms] Disabled: ${placeBtnStateAfter.disabled}`);
+            debugLog(`[BUTTON AFTER 500ms] Class: "${placeBtnStateAfter.className}"`);
+
+            // === SCREENSHOT #2: 1 second after click ===
+            await this.delay(500); // Now at 1 second
+            const screenshot1s = path.join(screenshotDir, `${debugTimestamp}_${tpPrice}_02_after_1s.png`);
+            try {
+                await this.page.screenshot({ path: screenshot1s, fullPage: false });
+                debugLog(`[SCREENSHOT] After 1s saved: ${screenshot1s}`);
+            } catch (e) {
+                debugLog(`[SCREENSHOT] Failed to save 1s screenshot: ${e}`);
+            }
+
+            // === DUMP ALL TOASTS (not just rejections) ===
+            const allToasts = await this.page.evaluate(() => {
+                const toastList = document.querySelector('.toastListInner-Hvz5Irky');
+                if (!toastList) return { found: false, html: '', count: 0 };
+
+                const toasts = toastList.querySelectorAll('.toastGroup-JUpQSPBo, .contentContainerWrapper-zMOxH_8U');
+                const toastTexts: string[] = [];
+                toasts.forEach((toast, i) => {
+                    toastTexts.push(`Toast ${i}: ${toast.textContent?.substring(0, 200) || 'empty'}`);
+                });
+
+                return {
+                    found: true,
+                    html: toastList.innerHTML.substring(0, 2000),
+                    count: toasts.length,
+                    texts: toastTexts
+                };
+            });
+            debugLog(`[TOASTS] Found: ${allToasts.found}, Count: ${allToasts.count}`);
+            if (allToasts.found && (allToasts as { texts?: string[] }).texts) {
+                for (const t of (allToasts as { texts: string[] }).texts) {
+                    debugLog(`[TOASTS] ${t}`);
+                }
+            }
 
             // Wait for order to fill while watching for rejection toasts
-            // Poll every 500ms for 10 seconds total
+            // Poll every 2 seconds for position state, total 10 seconds
             log("   Waiting for order to fill (10 seconds, watching for rejections)...");
             const waitStartTime = Date.now();
             const totalWaitMs = 10000;
-            const pollIntervalMs = 500;
+            const pollIntervalMs = 2000;
             let rejectionDetected = false;
             let rejectionMessage = "";
+            let pollCount = 0;
 
             while (Date.now() - waitStartTime < totalWaitMs) {
+                pollCount++;
+                const elapsedMs = Date.now() - waitStartTime;
+
+                // === CHECK POSITION TAB STATE ===
+                const positionState = await this.page.evaluate(() => {
+                    const positionsContainer = document.querySelector('div[data-account-manager-page-id="positions"]');
+                    const root = positionsContainer || document;
+                    const positionRows = root.querySelectorAll('tr.ka-tr.ka-row[data-row-id]');
+
+                    if (positionRows.length === 0) {
+                        return { hasPosition: false, count: 0, details: null };
+                    }
+
+                    const firstRow = positionRows[0];
+                    const symbol = firstRow.querySelector('td[data-label="Symbol"]')?.textContent?.trim() || '';
+                    const side = firstRow.querySelector('td[data-label="Side"]')?.textContent?.trim() || '';
+                    const qty = firstRow.querySelector('td[data-label="Qty"]')?.textContent?.trim() || '';
+                    const avgPrice = firstRow.querySelector('td[data-label="Avg Fill Price"]')?.textContent?.trim() || '';
+
+                    return {
+                        hasPosition: true,
+                        count: positionRows.length,
+                        details: { symbol, side, qty, avgPrice }
+                    };
+                });
+
+                debugLog(`[POSITION @${(elapsedMs / 1000).toFixed(1)}s] Has position: ${positionState.hasPosition}, Count: ${positionState.count}`);
+                if (positionState.details) {
+                    debugLog(`[POSITION @${(elapsedMs / 1000).toFixed(1)}s] ${positionState.details.side} ${positionState.details.qty} @ ${positionState.details.avgPrice}`);
+                }
+
                 // Check for rejection toast
                 const rejection = await this.page.evaluate(() => {
                     // Look for the rejection toast container
@@ -961,10 +1103,36 @@ export class TradingViewClient {
                     log(`   [REJECTION] Order: ${rejection.orderInfo}`);
                     log(`   [REJECTION] Reason: ${rejection.reason}`);
                     log(`   [REJECTION] Symbol: ${rejection.symbol}`);
+                    debugLog(`[REJECTION] ${rejectionMessage}`);
                     break;
                 }
 
                 await this.delay(pollIntervalMs);
+            }
+
+            // === SCREENSHOT #3: After wait complete ===
+            const screenshotAfter = path.join(screenshotDir, `${debugTimestamp}_${tpPrice}_03_after_wait.png`);
+            try {
+                await this.page.screenshot({ path: screenshotAfter, fullPage: false });
+                debugLog(`[SCREENSHOT] After wait saved: ${screenshotAfter}`);
+            } catch (e) {
+                debugLog(`[SCREENSHOT] Failed to save after screenshot: ${e}`);
+            }
+
+            // === DUMP FINAL TOAST STATE ===
+            const finalToasts = await this.page.evaluate(() => {
+                const toastList = document.querySelector('.toastListInner-Hvz5Irky');
+                return toastList?.innerHTML?.substring(0, 3000) || 'No toast list found';
+            });
+            debugLog(`[FINAL TOASTS HTML] ${finalToasts}`);
+
+            // === SAVE DEBUG FILE ===
+            debugLog(`=== ORDER DEBUG END ===`);
+            try {
+                fs.writeFileSync(debugFilePath, debugLines.join('\n'));
+                log(`   [DEBUG] Debug log saved to: ${debugFilePath}`);
+            } catch (e) {
+                log(`   [DEBUG] Failed to save debug file: ${e}`);
             }
 
             // If rejection was detected, return failure immediately
