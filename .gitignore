@@ -4,3 +4,4 @@ node_modules
 tradingview-session.json
 tradingview-alt-session.json
 .chrome-profiles
+debug_logs
