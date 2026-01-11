@@ -741,10 +741,17 @@ export class TradingViewClient {
                 log(`   [DOM] Equity raw text: "${equityRaw.text}"`);
 
                 const equity = parseFloat(equityRaw.text.replace(/,/g, ''));
+                const MAX_MARGIN = 1000; // Maximum margin cap for safety
                 marginAmount = Math.floor(equity * 0.9 * 100) / 100; // 90% of equity, rounded to 2 decimals
 
+                // Cap margin at maximum allowed
+                if (marginAmount > MAX_MARGIN) {
+                    log(`   ⚠️ Margin $${marginAmount.toLocaleString()} exceeds max $${MAX_MARGIN}, capping...`);
+                    marginAmount = MAX_MARGIN;
+                }
+
                 log(`   Equity parsed: $${equity.toLocaleString()}`);
-                log(`   Using 90% margin: $${marginAmount.toLocaleString()}`);
+                log(`   Using margin: $${marginAmount.toLocaleString()} (max: $${MAX_MARGIN})`);
             }
 
             // 1. Click the direction button FIRST (Buy or Sell)
@@ -914,6 +921,10 @@ export class TradingViewClient {
             log(`   [DOM] Place button text: "${placeBtnState.innerText}"`);
             log(`   [DOM] Place button disabled: ${placeBtnState.disabled}`);
             log(`   [DOM] Place button class: "${placeBtnState.className}"`);
+
+            // Wait 1 second for form to fully settle before placing order
+            log("   Waiting 1s for form to settle...");
+            await this.delay(1000);
 
             // === DEBUG SETUP: Create debug directory and file ===
             const debugTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
