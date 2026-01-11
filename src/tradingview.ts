@@ -1433,6 +1433,14 @@ export class TradingViewClient {
                 log(`   Total execution time: ${totalTime}s`);
                 log(`${"═".repeat(60)}\n`);
 
+                // Refresh the page after 10 seconds to clear any stuck UI state
+                log(`   🔄 Refreshing page in 10 seconds to clear UI state...`);
+                await this.delay(10000);
+                log(`   Refreshing page now...`);
+                await this.page.reload({ waitUntil: 'networkidle2', timeout: 60000 });
+                await this.delay(2000);
+                log(`   ✅ Page refreshed`);
+
                 return {
                     success: false,
                     error: `Order failed: No position created (entry price = 0) and no recent Market order in Order History. The order button was clicked but no order was placed.`,
