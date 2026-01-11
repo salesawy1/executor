@@ -19,19 +19,18 @@ import { TradeExecutionRequest, TradeExecutionResponse } from "./types.js";
 // Load environment variables
 dotenv.config();
 
-const PORT = process.env.PORT || 3001;
+// Parse CLI args
+const args = process.argv.slice(2);
+export const IS_ALT = args.includes("--alt") || process.env.IS_ALT === "true";
+const testMode = args.includes("--test") || args.includes("test=true") || process.env.TEST_MODE === "true";
 
-export const IS_ALT = false;
+const PORT = IS_ALT ? 3002 : process.env.PORT || 3001;
 
 // TradingView credentials
 const tvEmail = IS_ALT ? process.env.TRADINGVIEW_EMAIL_ALT : process.env.TRADINGVIEW_EMAIL;
 const tvPassword = IS_ALT ? process.env.TRADINGVIEW_PASSWORD_ALT : process.env.TRADINGVIEW_PASSWORD;
 const tvChartUrl = (IS_ALT ? process.env.TRADINGVIEW_CHART_URL_ALT : process.env.TRADINGVIEW_CHART_URL) || "https://www.tradingview.com/chart/2hWy6ct3/?symbol=MEXC%3AETHUSDT.P";
 const headless = process.env.HEADLESS === "true";
-
-// Parse CLI args for test mode
-const args = process.argv.slice(2);
-const testMode = args.includes("--test") || args.includes("test=true") || process.env.TEST_MODE === "true";
 
 if (!tvEmail || !tvPassword) {
     console.error("❌ Missing required environment variables:");
@@ -290,6 +289,14 @@ app.post("/execute-consensus", async (req: Request, res: Response) => {
         console.log(`   Entry Price: $${tradeSetup.entryPrice}`);
         console.log(`   Stop Loss: $${tradeSetup.stopLoss}`);
         console.log(`   Take Profit: $${tradeSetup.takeProfit1}`);
+
+        // Warn if TP/SL are missing or 0
+        if (!tradeSetup.stopLoss || tradeSetup.stopLoss === 0) {
+            console.warn(`   ⚠️ WARNING: Stop Loss is ${tradeSetup.stopLoss} - order will have NO SL`);
+        }
+        if (!tradeSetup.takeProfit1 || tradeSetup.takeProfit1 === 0) {
+            console.warn(`   ⚠️ WARNING: Take Profit is ${tradeSetup.takeProfit1} - order will have NO TP`);
+        }
 
         // Place order via Puppeteer
         const result = await tvClient.placeMarketOrder({
