@@ -176,46 +176,38 @@ export class TradingViewClient {
     }
 
     /**
-     * Check if already logged in by looking for user menu button
+     * Check if already logged in by looking for sessionid cookie.
+     * This is much faster than navigating to a page and checking UI elements.
      */
     private async checkIfLoggedIn(): Promise<boolean> {
         if (!this.page) return false;
 
         try {
-            // Navigate to signin page to check status
-            await this.page.goto("https://www.tradingview.com/accounts/signin/", {
-                waitUntil: "networkidle2",
-                timeout: 30000,
-            });
+            // Get all cookies for tradingview.com
+            const cookies = await this.page.cookies("https://www.tradingview.com");
 
-            await this.delay(2000);
+            // Look for the sessionid cookie - this is the primary auth cookie
+            const sessionCookie = cookies.find(c => c.name === "sessionid");
 
-            // Check for user menu button (logged in state)
-            const userMenuButton = await this.page.$(
-                '.tv-header__user-menu-button--logged, [data-name="header-user-menu-button"], button[aria-label="Open user menu"]'
-            );
-
-            if (userMenuButton) {
-                console.log("✅ Already logged in (session restored)!");
+            if (sessionCookie && sessionCookie.value) {
+                // Check if session has expired
+                const now = Date.now() / 1000; // Convert to seconds (cookie expires is in seconds)
+                if (sessionCookie.expires && sessionCookie.expires > now) {
+                    console.log("✅ Already logged in (sessionid cookie found)!");
+                    return true;
+                } else if (sessionCookie.expires && sessionCookie.expires <= now) {
+                    console.log("   Session cookie expired");
+                    return false;
+                }
+                // If no expires field, assume it's valid
+                console.log("✅ Already logged in (sessionid cookie found)!");
                 return true;
             }
 
-            // Also check if we were redirected to home page with logged in state
-            const currentUrl = this.page.url();
-            if (!currentUrl.includes('/accounts/signin')) {
-                // We were redirected, check for user menu on current page
-                const userMenu = await this.page.$(
-                    '.tv-header__user-menu-button--logged, [data-name="header-user-menu-button"]'
-                );
-                if (userMenu) {
-                    console.log("✅ Already logged in (redirected from signin)!");
-                    return true;
-                }
-            }
-
+            console.log("   No sessionid cookie found");
             return false;
         } catch (e) {
-            console.log("   Error checking login status");
+            console.log("   Error checking login status via cookies");
             return false;
         }
     }
