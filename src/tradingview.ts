@@ -380,7 +380,7 @@ export class TradingViewClient {
             await this.delay(1000);
 
             // Click the Connect button to confirm broker connection
-            await this.page.waitForSelector('button[name="broker-login-submit-button"]', { timeout: 5000 });
+            await this.page.waitForSelector('button[name="broker-login-submit-button"]', { timeout: 3000 });
             await this.page.click('button[name="broker-login-submit-button"]');
             await this.delay(2000);
 
