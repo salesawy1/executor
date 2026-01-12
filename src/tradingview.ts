@@ -734,7 +734,7 @@ export class TradingViewClient {
 
                 const equity = parseFloat(equityRaw.text.replace(/,/g, ''));
                 const MAX_MARGIN = IS_ALT ? Infinity : 1000;
-                marginAmount = Math.floor(equity * 0.9 * 100) / 100; // 90% of equity, rounded to 2 decimals
+                marginAmount = Math.floor(equity * 0.95 * 100) / 100; // 95% of equity, rounded to 2 decimals
 
                 // Cap margin at maximum allowed
                 if (marginAmount > MAX_MARGIN) {
