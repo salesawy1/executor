@@ -32,6 +32,32 @@ const tvPassword = IS_ALT ? process.env.TRADINGVIEW_PASSWORD_ALT : process.env.T
 const tvChartUrl = (IS_ALT ? process.env.TRADINGVIEW_CHART_URL_ALT : process.env.TRADINGVIEW_CHART_URL) || "https://www.tradingview.com/chart/2hWy6ct3/?symbol=MEXC%3AETHUSDT.P";
 const headless = process.env.HEADLESS === "true";
 
+/**
+ * Parse TradingView chart URL to extract symbol and exchange
+ * Examples:
+ *   BYBIT%3AETHUSDT.P → { symbol: "ETHUSDT.P", exchange: "Bybit" }
+ *   ETPZ2030         → { symbol: "ETPZ2030", exchange: "Coinbase" }
+ */
+function parseChartUrl(url: string): { symbol: string; exchange: string } {
+    try {
+        const urlObj = new URL(url);
+        const symbolParam = decodeURIComponent(urlObj.searchParams.get("symbol") || "");
+
+        if (symbolParam.toUpperCase().includes("BYBIT")) {
+            // Format: BYBIT:ETHUSDT.P
+            const symbol = symbolParam.split(":")[1] || symbolParam;
+            return { symbol, exchange: "Bybit" };
+        }
+        // Default to Coinbase for non-Bybit symbols
+        return { symbol: symbolParam, exchange: "Coinbase" };
+    } catch {
+        return { symbol: "UNKNOWN", exchange: "Unknown" };
+    }
+}
+
+// Extract symbol and exchange from chart URL at startup
+const { symbol: chartSymbol, exchange: chartExchange } = parseChartUrl(tvChartUrl);
+
 if (!tvEmail || !tvPassword) {
     console.error("❌ Missing required environment variables:");
     console.error("   TRADINGVIEW_EMAIL");
@@ -319,6 +345,8 @@ app.post("/execute-consensus", async (req: Request, res: Response) => {
         res.json({
             success: result.success,
             symbol,
+            asset: chartSymbol,      // Extracted from chart URL (e.g., "ETHUSDT.P" or "ETPZ2030")
+            exchange: chartExchange, // Extracted from chart URL (e.g., "Bybit" or "Coinbase")
             direction,
             side: direction === "LONG" ? "buy" : "sell",
             size,
