@@ -1810,8 +1810,12 @@ export class TradingViewClient {
                 const symbolCell = firstRow.querySelector('td[data-label="Symbol"]');
                 const sideCell = firstRow.querySelector('td[data-label="Side"]');
                 const qtyCell = firstRow.querySelector('td[data-label="Qty"]');
-                const avgPriceCell = firstRow.querySelector('td[data-label="Avg Fill Price"]');
-                const pnlCell = firstRow.querySelector('td[data-label="Unrealized P&L"]');
+                // Coinbase uses "Avg Price", Paper trading uses "Avg Fill Price"
+                const avgPriceCell = firstRow.querySelector('td[data-label="Avg Price"]')
+                    || firstRow.querySelector('td[data-label="Avg Fill Price"]');
+                // Coinbase uses "Unrealized P/L", Paper trading uses "Unrealized P&L"
+                const pnlCell = firstRow.querySelector('td[data-label="Unrealized P/L"]')
+                    || firstRow.querySelector('td[data-label="Unrealized P&L"]');
 
                 return {
                     symbol: symbolCell?.textContent?.trim() || 'unknown',
