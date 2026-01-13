@@ -22,6 +22,7 @@ dotenv.config();
 // Parse CLI args
 const args = process.argv.slice(2);
 export const IS_ALT = args.includes("--alt") || process.env.IS_ALT === "true";
+export const IS_PROD = args.includes("--prod") || process.env.IS_PROD === "true";
 const testMode = args.includes("--test") || args.includes("test=true") || process.env.TEST_MODE === "true";
 
 const PORT = IS_ALT ? 3002 : process.env.PORT || 3001;
@@ -347,6 +348,7 @@ app.post("/execute-consensus", async (req: Request, res: Response) => {
             symbol,
             asset: chartSymbol,      // Extracted from chart URL (e.g., "ETHUSDT.P" or "ETPZ2030")
             exchange: chartExchange, // Extracted from chart URL (e.g., "Bybit" or "Coinbase")
+            connector: IS_PROD ? "Coinbase Advanced" : "Paper Trading", // Broker connection type
             direction,
             side: direction === "LONG" ? "buy" : "sell",
             size,

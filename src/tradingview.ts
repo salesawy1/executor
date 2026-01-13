@@ -12,11 +12,16 @@ import puppeteer, { Browser, Page } from "puppeteer";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
-import { IS_ALT } from './index.js';
+import { IS_ALT, IS_PROD } from './index.js';
+import { SectionLogger, createSectionLogger } from './logger.js';
 
 // ES module __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Coinbase contract parameters for auto-sizing
+const COINBASE_CONTRACT_SIZE = 0.1; // ETH per contract
+const COINBASE_LEVERAGE = 10;       // Default leverage
 
 export interface TradingViewConfig {
     email: string;
@@ -39,6 +44,7 @@ export interface ExecutionDetails {
     entryPrice: number;
     quantity: number;
     marginUsed: number;
+    fee?: number;
     takeProfit?: number;
     stopLoss?: number;
     timestamp: string;
@@ -366,17 +372,19 @@ export class TradingViewClient {
     }
 
     /**
-     * Connect to paper trading broker
+     * Connect to trading broker (Paper Trading or Coinbase Advanced based on IS_PROD)
      */
     private async connectPaperTradingBroker(): Promise<void> {
         if (!this.page) throw new Error("Browser not initialized");
 
-        console.log("🔗 Connecting to paper trading broker...");
+        const brokerType = IS_PROD ? "COINBASE" : "Paper";
+        const brokerName = IS_PROD ? "Coinbase Advanced" : "Paper Trading";
+        console.log(`🔗 Connecting to ${brokerName} broker...`);
 
         try {
-            // Wait for and click the Paper Trading broker card
-            await this.page.waitForSelector('[data-broker="Paper"]', { timeout: 10000 });
-            await this.page.click('[data-broker="Paper"]');
+            // Wait for and click the broker card
+            await this.page.waitForSelector(`[data-broker="${brokerType}"]`, { timeout: 10000 });
+            await this.page.click(`[data-broker="${brokerType}"]`);
             await this.delay(1000);
 
             // Click the Connect button to confirm broker connection
@@ -384,10 +392,10 @@ export class TradingViewClient {
             await this.page.click('button[name="broker-login-submit-button"]');
             await this.delay(2000);
 
-            console.log("✅ Paper trading broker connected!");
+            console.log(`✅ ${brokerName} broker connected!`);
             this.isBrokerConnected = true;
         } catch (e) {
-            console.log("⚠️  Could not connect paper trading broker automatically. May need manual connection.");
+            console.log(`⚠️  Could not connect ${brokerName} broker automatically. May need manual connection.`);
             // Still mark as connected to allow manual intervention
             this.isBrokerConnected = true;
         }
@@ -572,13 +580,15 @@ export class TradingViewClient {
             }
         }
 
-        // After clearing modals, check if we need to reconnect to the Paper Trading broker
+        // After clearing modals, check if we need to reconnect to the broker
         // This happens when we're logged in but disconnected from the broker session
-        const paperBrokerCard = await this.page.$('[data-broker="Paper"]');
-        if (paperBrokerCard) {
-            console.log("⚠️  Paper Trading broker disconnected. Reconnecting...");
+        const brokerType = IS_PROD ? "COINBASE" : "Paper";
+        const brokerName = IS_PROD ? "Coinbase Advanced" : "Paper Trading";
+        const brokerCard = await this.page.$(`[data-broker="${brokerType}"]`);
+        if (brokerCard) {
+            console.log(`⚠️  ${brokerName} broker disconnected. Reconnecting...`);
             try {
-                await paperBrokerCard.click();
+                await brokerCard.click();
                 await this.delay(1000);
 
                 // Click the Connect button to confirm broker connection
@@ -588,9 +598,9 @@ export class TradingViewClient {
                     await loginBtn.click();
                     await this.delay(2000);
                 }
-                console.log("✅ Paper Trading broker reconnected!");
+                console.log(`✅ ${brokerName} broker reconnected!`);
             } catch (e) {
-                console.log("⚠️  Could not reconnect Paper Trading broker automatically.");
+                console.log(`⚠️  Could not reconnect ${brokerName} broker automatically.`);
             }
         }
     }
@@ -600,48 +610,46 @@ export class TradingViewClient {
      * Will automatically restart browser and retry once if CDP connection is lost.
      */
     async placeMarketOrder(params: OrderParams, isRetry: boolean = false): Promise<ExecutionResult> {
-        // Log capture array - will be returned with result
-        const logs: string[] = [];
-        const startTime = Date.now();
+        // Create section logger for color-coded output
+        const logger = createSectionLogger();
 
-        const log = (msg: string) => {
-            const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-            const timestamp = new Date().toISOString();
-            const logLine = `[${timestamp}] [+${elapsed}s] ${msg}`;
-            logs.push(logLine);
-            console.log(msg);
-        };
+        // Helper to get logs array for return value
+        const getLogs = () => logger.getLogs();
+
+        // Backwards-compatible log function that uses the logger
+        const log = (msg: string) => logger.log(msg);
 
         if (!this.page) {
             if (isRetry) {
-                return { success: false, error: "Browser not initialized after restart", executionLogs: logs };
+                return { success: false, error: "Browser not initialized after restart", executionLogs: getLogs() };
             }
-            log("⚠️  Browser not initialized. Attempting to restart...");
+            logger.warn("Browser not initialized. Attempting to restart...");
             await this.restartBrowser();
             return this.placeMarketOrder(params, true);
         }
 
-        log(`\n${"═".repeat(60)}`);
-        log(`📤 PLACING MARKET ORDER${isRetry ? ' (RETRY)' : ''}`);
-        log(`${"═".repeat(60)}`);
-        log(`   Direction: ${params.direction}`);
-        log(`   Quantity: ${params.quantity}`);
-        if (params.stopLoss) log(`   Stop Loss: $${params.stopLoss}`);
-        if (params.takeProfit) log(`   Take Profit: $${params.takeProfit}`);
-        log(`   Page URL: ${this.page.url()}`);
+        // Print main order header
+        logger.header(`PLACING MARKET ORDER${isRetry ? ' (RETRY)' : ''}`, 'start');
+        logger.log(`Direction: ${params.direction}`);
+        logger.log(`Quantity: ${params.quantity}`);
+        if (params.stopLoss) logger.log(`Stop Loss: $${params.stopLoss}`);
+        if (params.takeProfit) logger.log(`Take Profit: $${params.takeProfit}`);
+        logger.log(`Page URL: ${this.page.url()}`);
 
         try {
             // Ensure we are connected before trying to interact
-            log("🔗 Checking connection status...");
+            logger.startSection('connection');
+            logger.log("Checking connection status...");
             await this.ensureConnection();
-            log("   Connection verified");
+            logger.success("Connection verified");
 
             // Dismiss any promotion modals that might block order placement
-            log("🔍 Checking for promotion modals...");
+            logger.log("Checking for promotion modals...");
             await this.dismissPromotionModal();
 
             // === CHECK FOR EXISTING OPEN POSITIONS ===
-            log("📋 Checking for existing open positions...");
+            logger.startSection('position_check');
+            logger.log("Checking for existing open positions...");
 
             // Click on positions tab to check
             const posTab = await this.page.$('button#positions');
@@ -699,60 +707,119 @@ export class TradingViewClient {
                 return {
                     success: false,
                     error: `Existing position detected: ${existingPosition.side} ${existingPosition.qty} @ ${existingPosition.avgPrice} (P&L: ${existingPosition.pnl}). Close the existing position before placing a new order.`,
-                    executionLogs: logs
+                    executionLogs: getLogs()
                 };
             } else {
                 log(`   ✓ No existing positions detected, proceeding with order`);
             }
 
             // Ensure order form is open
-            log("📝 Opening order form...");
+            logger.startSection('order_form');
+            logger.log("Opening order form...");
             const orderFormBefore = await this.page.$('[data-name="side-control-buy"], [data-name="side-control-sell"]');
-            log(`   Order form visible before: ${orderFormBefore ? 'YES' : 'NO'}`);
+            logger.detail(`Order form visible before: ${orderFormBefore ? 'YES' : 'NO'}`);
             await this.openOrderForm();
             const orderFormAfter = await this.page.$('[data-name="side-control-buy"], [data-name="side-control-sell"]');
-            log(`   Order form visible after: ${orderFormAfter ? 'YES' : 'NO'}`);
+            logger.detail(`Order form visible after: ${orderFormAfter ? 'YES' : 'NO'}`);
 
             // Handle auto-margin sizing if quantity is -1
             let useMarginMode = params.quantity < 0;
             let marginAmount = 0;
+            let feeAmount = 0; // Captured from order preview in prod mode
+            let autoCalculatedContracts = 0; // For prod mode contract calculation
 
             if (useMarginMode) {
-                log("   📊 Auto-sizing position from equity...");
+                const fieldName = IS_PROD ? "Balance" : "Equity";
+                log(`   📊 Auto-sizing position from ${fieldName}...`);
 
-                // Read equity from the account summary
-                const equityRaw = await this.page.evaluate(() => {
-                    const equityElement = document.querySelector('.accountSummaryField-tWnxJF90 .value-tWnxJF90');
+                // Read balance/equity from the account summary
+                // Find the specific field by matching the title text
+                const balanceRaw = await this.page.evaluate((targetField: string) => {
+                    const fields = Array.from(document.querySelectorAll('.accountSummaryField-tWnxJF90'));
+                    for (const field of fields) {
+                        const title = field.querySelector('.title-tWnxJF90');
+                        if (title?.textContent?.trim() === targetField) {
+                            const value = field.querySelector('.value-tWnxJF90');
+                            return {
+                                text: value?.textContent || '0',
+                                exists: true,
+                                fieldName: targetField
+                            };
+                        }
+                    }
+                    // Fallback: try first field if target not found
+                    const firstValue = document.querySelector('.accountSummaryField-tWnxJF90 .value-tWnxJF90');
                     return {
-                        text: equityElement?.textContent || '0',
-                        exists: !!equityElement,
-                        className: equityElement?.className || 'N/A'
+                        text: firstValue?.textContent || '0',
+                        exists: !!firstValue,
+                        fieldName: 'fallback'
                     };
-                });
-                log(`   [DOM] Equity element found: ${equityRaw.exists}`);
-                log(`   [DOM] Equity raw text: "${equityRaw.text}"`);
+                }, fieldName);
+                log(`   [DOM] ${fieldName} field found: ${balanceRaw.exists} (matched: ${balanceRaw.fieldName})`);
+                log(`   [DOM] ${fieldName} raw text: "${balanceRaw.text}"`);
 
-                const equity = parseFloat(equityRaw.text.replace(/,/g, ''));
-                const MAX_MARGIN = IS_ALT ? Infinity : 1000;
-                marginAmount = Math.floor(equity * 0.95 * 100) / 100; // 95% of equity, rounded to 2 decimals
+                const balance = parseFloat(balanceRaw.text.replace(/,/g, '').replace(/[^\d.-]/g, ''));
+                log(`   ${fieldName} parsed: $${balance.toLocaleString()}`);
 
-                // Cap margin at maximum allowed
-                if (marginAmount > MAX_MARGIN) {
-                    log(`   ⚠️ Margin $${marginAmount.toLocaleString()} exceeds max $${MAX_MARGIN}, capping...`);
-                    marginAmount = MAX_MARGIN;
+                if (IS_PROD) {
+                    // PROD MODE: Calculate max contracts based on price, contract size, and leverage
+                    // Read current price from the side button (buy or sell based on direction)
+                    const sideButtonSelector = params.direction === "LONG"
+                        ? '[data-name="side-control-buy"]'
+                        : '[data-name="side-control-sell"]';
+
+                    const priceRaw = await this.page.evaluate((selector: string) => {
+                        const btn = document.querySelector(selector);
+                        const valueEl = btn?.querySelector('.value-OnZ1FRe5');
+                        return {
+                            text: valueEl?.textContent || '0',
+                            exists: !!valueEl
+                        };
+                    }, sideButtonSelector);
+
+                    log(`   [PROD] Price from side button: "${priceRaw.text}"`);
+                    const currentPrice = parseFloat(priceRaw.text.replace(/,/g, '')) || 0;
+
+                    if (currentPrice > 0) {
+                        // Calculate margin per contract: (price * contractSize) / leverage
+                        const marginPerContract = (currentPrice * COINBASE_CONTRACT_SIZE) / COINBASE_LEVERAGE;
+                        log(`   [PROD] Margin per contract: $${marginPerContract.toFixed(4)} = ($${currentPrice} × ${COINBASE_CONTRACT_SIZE}) / ${COINBASE_LEVERAGE}`);
+
+                        // Calculate max contracts that fit in 90% of balance (must be whole number)
+                        const availableMargin = balance * 0.90;
+                        autoCalculatedContracts = Math.floor(availableMargin / marginPerContract);
+                        marginAmount = autoCalculatedContracts * marginPerContract;
+
+                        log(`   [PROD] Available margin (90%): $${availableMargin.toFixed(2)}`);
+                        log(`   [PROD] Max whole contracts: ${autoCalculatedContracts}`);
+                        log(`   [PROD] Actual margin used: $${marginAmount.toFixed(2)}`);
+                    } else {
+                        log(`   [PROD] ⚠️ Could not read price, defaulting to 1 contract`);
+                        autoCalculatedContracts = 1;
+                    }
+                } else {
+                    // PAPER TRADING MODE: Use 90% of equity as margin (existing behavior)
+                    const MAX_MARGIN = IS_ALT ? Infinity : 1000;
+                    marginAmount = Math.floor(balance * 0.90 * 100) / 100; // 90% of balance, rounded to 2 decimals
+
+                    // Cap margin at maximum allowed
+                    if (marginAmount > MAX_MARGIN) {
+                        log(`   ⚠️ Margin $${marginAmount.toLocaleString()} exceeds max $${MAX_MARGIN}, capping...`);
+                        marginAmount = MAX_MARGIN;
+                    }
+
+                    log(`   Using margin: $${marginAmount.toLocaleString()} (max: $${MAX_MARGIN})`);
                 }
-
-                log(`   Equity parsed: $${equity.toLocaleString()}`);
-                log(`   Using margin: $${marginAmount.toLocaleString()} (max: $${MAX_MARGIN})`);
             }
 
             // 1. Click the direction button FIRST (Buy or Sell)
+            logger.startSection('direction', params.direction);
             const sideSelector = params.direction === "LONG"
                 ? '[data-name="side-control-buy"]'
                 : '[data-name="side-control-sell"]';
 
-            log(`   Clicking ${params.direction === "LONG" ? "BUY" : "SELL"} side...`);
-            log(`   [DOM] Selector: ${sideSelector}`);
+            logger.log(`Clicking ${params.direction === "LONG" ? "BUY" : "SELL"} side...`);
+            logger.dom(`Selector: ${sideSelector}`);
             const sideBtn = await this.page.waitForSelector(sideSelector, { timeout: 5000 });
             const sideBtnState = await this.page.evaluate((sel) => {
                 const el = document.querySelector(sel) as HTMLElement;
@@ -766,11 +833,12 @@ export class TradingViewClient {
             log(`   [DOM] aria-checked before click: ${sideBtnState.ariaChecked}`);
             await this.page.click(sideSelector);
             await this.delay(500);
-            log(`   Side button clicked ✓`);
+            logger.success("Side button clicked");
 
             // 2. Select Market order type (switch from Limit)
-            log("   Selecting Market order type...");
-            log(`   [DOM] Selector: button#Market`);
+            logger.startSection('order_type');
+            logger.log("Selecting Market order type...");
+            logger.dom("Selector: button#Market");
             await this.page.waitForSelector('button#Market', { timeout: 5000 });
             const marketBtnState = await this.page.evaluate(() => {
                 const el = document.querySelector('button#Market') as HTMLElement;
@@ -784,11 +852,38 @@ export class TradingViewClient {
             log(`   [DOM] aria-selected before: ${marketBtnState.ariaSelected}`);
             await this.page.click('button#Market');
             await this.delay(500);
-            log(`   Market order type selected ✓`);
+            logger.success("Market order type selected");
 
-            // 2.5. Set margin amount if auto-sizing
+            // 2.5. Set quantity or margin based on mode
             let actualQuantity = params.quantity;
-            if (useMarginMode && marginAmount > 0) {
+
+            if (useMarginMode && IS_PROD && autoCalculatedContracts > 0) {
+                // PROD MODE AUTO-SIZING: Enter quantity directly (whole number of contracts)
+                logger.startSection('quantity', `${autoCalculatedContracts} contracts`);
+                logger.log(`Setting quantity to ${autoCalculatedContracts} contracts...`);
+                logger.dom("Selector: #quantity-field");
+                const qtyInput = await this.page.$('#quantity-field');
+                if (qtyInput) {
+                    log(`   [DOM] Quantity input found, clicking to select...`);
+                    await qtyInput.click({ clickCount: 3 });
+                    await this.delay(100);
+                    log(`   [DOM] Typing quantity value: ${autoCalculatedContracts}`);
+                    await qtyInput.type(String(autoCalculatedContracts), { delay: 100 });
+                    // Read back to confirm
+                    const qtyReadBack = await this.page.evaluate(() => {
+                        const input = document.querySelector('#quantity-field') as HTMLInputElement;
+                        return input?.value || 'N/A';
+                    });
+                    log(`   [DOM] Quantity read-back value: "${qtyReadBack}"`);
+                    actualQuantity = parseFloat(qtyReadBack.replace(/,/g, '')) || autoCalculatedContracts;
+                } else {
+                    log(`   ⚠️ [DOM] Quantity input NOT found!`);
+                    actualQuantity = autoCalculatedContracts;
+                }
+                await this.delay(500);
+                log(`   [PROD] Quantity set to ${actualQuantity} contracts ✓`);
+            } else if (useMarginMode && marginAmount > 0) {
+                // PAPER TRADING AUTO-SIZING: Enter margin via margin input
                 log(`   Setting margin to $${marginAmount.toFixed(2)}...`);
                 log(`   [DOM] Selector: #quantity-calculation-field`);
                 const marginInput = await this.page.$('#quantity-calculation-field');
@@ -815,12 +910,36 @@ export class TradingViewClient {
                 log(`   [DOM] Quantity field value: "${qtyRaw.value}"`);
                 actualQuantity = parseFloat(qtyRaw.value.replace(/,/g, ''));
                 log(`   Auto-calculated quantity: ${actualQuantity} contracts`);
+            } else if (params.quantity > 0) {
+                // Manual quantity mode: enter quantity directly
+                log(`   Setting quantity to ${params.quantity} contracts...`);
+                log(`   [DOM] Selector: #quantity-field`);
+                const qtyInput = await this.page.$('#quantity-field');
+                if (qtyInput) {
+                    log(`   [DOM] Quantity input found, clicking to select...`);
+                    await qtyInput.click({ clickCount: 3 });
+                    await this.delay(100);
+                    log(`   [DOM] Typing quantity value: ${params.quantity}`);
+                    await qtyInput.type(String(params.quantity), { delay: 100 });
+                    // Read back to confirm
+                    const qtyReadBack = await this.page.evaluate(() => {
+                        const input = document.querySelector('#quantity-field') as HTMLInputElement;
+                        return input?.value || 'N/A';
+                    });
+                    log(`   [DOM] Quantity read-back value: "${qtyReadBack}"`);
+                    actualQuantity = parseFloat(qtyReadBack.replace(/,/g, '')) || params.quantity;
+                } else {
+                    log(`   ⚠️ [DOM] Quantity input NOT found!`);
+                }
+                await this.delay(500);
+                log(`   Quantity set to ${actualQuantity} contracts ✓`);
             }
 
             // 3. Set Take Profit if provided
             if (params.takeProfit) {
-                log("   Enabling take profit...");
-                log(`   [DOM] Selector: input[data-qa-id="order-ticket-profit-checkbox-bracket"]`);
+                logger.startSection('take_profit', `$${params.takeProfit.toFixed(2)}`);
+                logger.log("Enabling take profit...");
+                logger.dom('Selector: input[data-qa-id="order-ticket-profit-checkbox-bracket"]');
                 const tpCheckbox = await this.page.$('input[data-qa-id="order-ticket-profit-checkbox-bracket"]');
                 if (tpCheckbox) {
                     const tpCheckedBefore = await this.page.evaluate(() => {
@@ -854,25 +973,31 @@ export class TradingViewClient {
                     log(`   ⚠️ [DOM] TP input NOT found!`);
                 }
                 await this.delay(300);
-                log(`   Take profit set ✓`);
+                logger.success("Take profit set");
             }
 
             // 4. Set Stop Loss if provided
             if (params.stopLoss) {
-                log("   Enabling stop loss...");
-                log(`   [DOM] Selector: input[data-qa-id="order-ticket-loss-checkbox-bracket"]`);
-                const slCheckbox = await this.page.$('input[data-qa-id="order-ticket-loss-checkbox-bracket"]');
-                if (slCheckbox) {
-                    const slCheckedBefore = await this.page.evaluate(() => {
-                        const cb = document.querySelector('input[data-qa-id="order-ticket-loss-checkbox-bracket"]') as HTMLInputElement;
-                        return cb?.checked;
-                    });
-                    log(`   [DOM] SL checkbox checked before: ${slCheckedBefore}`);
-                    await slCheckbox.click();
-                    await this.delay(300);
-                    log(`   SL checkbox clicked ✓`);
+                // In prod mode, clicking TP checkbox auto-enables SL, so skip the SL checkbox click
+                logger.startSection('stop_loss', `$${params.stopLoss.toFixed(2)}`);
+                if (!IS_PROD) {
+                    logger.log("Enabling stop loss...");
+                    logger.dom('Selector: input[data-qa-id="order-ticket-loss-checkbox-bracket"]');
+                    const slCheckbox = await this.page.$('input[data-qa-id="order-ticket-loss-checkbox-bracket"]');
+                    if (slCheckbox) {
+                        const slCheckedBefore = await this.page.evaluate(() => {
+                            const cb = document.querySelector('input[data-qa-id="order-ticket-loss-checkbox-bracket"]') as HTMLInputElement;
+                            return cb?.checked;
+                        });
+                        log(`   [DOM] SL checkbox checked before: ${slCheckedBefore}`);
+                        await slCheckbox.click();
+                        await this.delay(300);
+                        log(`   SL checkbox clicked ✓`);
+                    } else {
+                        log(`   ⚠️ [DOM] SL checkbox NOT found!`);
+                    }
                 } else {
-                    log(`   ⚠️ [DOM] SL checkbox NOT found!`);
+                    log("   [PROD] SL auto-enabled by TP checkbox, skipping SL checkbox click");
                 }
 
                 log(`   Setting stop loss to ${params.stopLoss.toFixed(2)}...`);
@@ -894,11 +1019,12 @@ export class TradingViewClient {
                     log(`   ⚠️ [DOM] SL input NOT found!`);
                 }
                 await this.delay(300);
-                log(`   Stop loss set ✓`);
+                logger.success("Stop loss set");
             }
 
             // 5. Click the Place Order button
-            log("   Clicking Place Order button...");
+            logger.startSection('place_order');
+            logger.log("Clicking Place Order button...");
             log(`   [DOM] Selector: button[data-name="place-and-modify-button"]`);
             const placeBtn = await this.page.waitForSelector('button[data-name="place-and-modify-button"]', { timeout: 5000 });
             const placeBtnState = await this.page.evaluate(() => {
@@ -978,6 +1104,66 @@ export class TradingViewClient {
             await this.page.click('button[data-name="place-and-modify-button"]');
             log(`   Place Order button clicked ✓`);
             debugLog(`[CLICK] Place Order button clicked at ${new Date().toISOString()}`);
+
+            // === PROD MODE: Order Preview Flow ===
+            // In prod (Coinbase), clicking place order shows a preview with fee
+            // We need to read the fee and then click "Send Order" to confirm
+            if (IS_PROD) {
+                log(`   [PROD] Waiting for order preview...`);
+                await this.delay(500);
+
+                // Read fee from order preview
+                const feeResult = await this.page.evaluate(() => {
+                    const listItems = Array.from(document.querySelectorAll('[class*="listItem-"]'));
+                    for (const item of listItems) {
+                        const title = item.querySelector('[class*="listItemTitle-"]');
+                        if (title?.textContent?.trim() === 'Fee') {
+                            const data = item.querySelector('[class*="listItemData-"]');
+                            return {
+                                found: true,
+                                text: data?.textContent?.trim() || '0',
+                            };
+                        }
+                    }
+                    return { found: false, text: '0' };
+                });
+
+                if (feeResult.found) {
+                    feeAmount = parseFloat(feeResult.text.replace(/[^0-9.-]/g, '')) || 0;
+                    log(`   [PROD] Fee from preview: $${feeAmount}`);
+                } else {
+                    log(`   [PROD] ⚠️ Could not find Fee in order preview`);
+                }
+
+                // Click "Send Order" button to confirm
+                log(`   [PROD] Clicking Send Order to confirm...`);
+
+                // Use text-based search as primary method (most reliable)
+                const clicked = await this.page.evaluate(() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    for (const btn of buttons) {
+                        if (btn.textContent?.trim() === 'Send Order') {
+                            (btn as HTMLButtonElement).click();
+                            return { clicked: true, text: btn.textContent };
+                        }
+                    }
+                    // Also try buttons that contain "Send Order"
+                    for (const btn of buttons) {
+                        if (btn.textContent?.includes('Send Order')) {
+                            (btn as HTMLButtonElement).click();
+                            return { clicked: true, text: btn.textContent };
+                        }
+                    }
+                    return { clicked: false, text: null };
+                });
+
+                if (clicked.clicked) {
+                    log(`   [PROD] Send Order clicked ✓ (button text: "${clicked.text?.trim()}")`);
+                } else {
+                    log(`   [PROD] ⚠️ Could not find Send Order button`);
+                }
+                await this.delay(1000); // Wait for order to process
+            }
 
             // === CHECK BUTTON STATE IMMEDIATELY AFTER CLICK (500ms) ===
             await this.delay(500);
@@ -1145,7 +1331,7 @@ export class TradingViewClient {
                 return {
                     success: false,
                     error: `Order rejected: ${rejectionMessage}`,
-                    executionLogs: logs
+                    executionLogs: getLogs()
                 };
             }
 
@@ -1190,8 +1376,11 @@ export class TradingViewClient {
             }
 
             // Try multiple selectors for avg fill price
+            // Note: Coinbase uses "Avg Price" while Bybit Paper uses "Avg Fill Price"
             const avgFillSelectors = [
-                'td[data-label="Avg Fill Price"] span',
+                'td[data-label="Avg Price"] span',       // Coinbase prod
+                'td[data-label="Avg Price"]',            // Coinbase prod (no span)
+                'td[data-label="Avg Fill Price"] span',  // Bybit paper
                 'td[data-label="Avg Fill Price"]',
                 'td[data-label="Avg. Fill Price"] span',
                 'td[data-label="Entry Price"] span',
@@ -1255,15 +1444,25 @@ export class TradingViewClient {
             }
 
             // Now read the avg fill price with the standard selector
-            log(`   [DOM] Final read with: td[data-label="Avg Fill Price"] span`);
-            const avgFillRaw = await this.page.evaluate(() => {
-                const avgFillCell = document.querySelector('td[data-label="Avg Fill Price"] span');
+            // Note: Coinbase uses "Avg Price", Bybit Paper uses "Avg Fill Price"
+            const avgPriceSelector = IS_PROD
+                ? 'td[data-label="Avg Price"] span'
+                : 'td[data-label="Avg Fill Price"] span';
+            log(`   [DOM] Final read with: ${avgPriceSelector}`);
+            const avgFillRaw = await this.page.evaluate((selector: string) => {
+                // Try the primary selector first
+                let avgFillCell = document.querySelector(selector);
+                // Fallback to the other format
+                if (!avgFillCell) {
+                    avgFillCell = document.querySelector('td[data-label="Avg Price"] span')
+                        || document.querySelector('td[data-label="Avg Fill Price"] span');
+                }
                 return {
                     text: avgFillCell?.textContent || null,
                     exists: !!avgFillCell,
                     parentHTML: avgFillCell?.parentElement?.outerHTML?.substring(0, 300) || null
                 };
-            });
+            }, avgPriceSelector);
             log(`   [DOM] Avg Fill element found: ${avgFillRaw.exists}`);
             log(`   [DOM] Avg Fill raw text: "${avgFillRaw.text}"`);
             if (avgFillRaw.parentHTML) {
@@ -1280,7 +1479,8 @@ export class TradingViewClient {
             } else {
                 log("   ❌ FAILED to read avg fill price from ANY selector!");
                 // Try to get ANY price from the position row data
-                const priceKeys = ['Avg Fill Price', 'Entry Price', 'Price', 'Avg. Fill'];
+                // Note: Coinbase uses "Avg Price" while Bybit uses "Avg Fill Price"
+                const priceKeys = ['Avg Price', 'Avg Fill Price', 'Entry Price', 'Price', 'Avg. Fill'];
                 const rowData = positionRowData.data as Record<string, string>;
                 for (const key of priceKeys) {
                     if (rowData && rowData[key]) {
@@ -1337,16 +1537,20 @@ export class TradingViewClient {
                 const rows = Array.from(document.querySelectorAll('tr.ka-tr.ka-row'));
                 const results: string[] = [];
                 for (const row of rows) {
-                    const typeCell = row.querySelector('td[data-label="Type"] .cellContent-pnigL71h');
+                    // Try multiple selectors for Type cell (different class patterns between brokers)
+                    const typeCell = row.querySelector('td[data-label="Type"]');
                     const typeText = typeCell?.textContent?.trim() || 'N/A';
                     results.push(`Row Type: "${typeText}"`);
                     if (typeText === 'Market') {
-                        const marginCell = row.querySelector('td[data-label="Margin"] .cellContent-pnigL71h span span:first-child');
-                        const placingTimeCell = row.querySelector('td[data-label="Placing Time"]');
+                        // Margin column - Paper trading uses "Margin", Coinbase doesn't have it
+                        const marginCell = row.querySelector('td[data-label="Margin"]');
+                        // Time column - Paper trading uses "Placing Time", Coinbase uses "Time Placed"
+                        const placingTimeCell = row.querySelector('td[data-label="Time Placed"]')
+                            || row.querySelector('td[data-label="Placing Time"]');
                         const sideCell = row.querySelector('td[data-label="Side"]');
                         return {
                             found: true,
-                            marginText: marginCell?.textContent || null,
+                            marginText: marginCell?.textContent?.trim() || null,
                             placingTime: placingTimeCell?.textContent?.trim() || null,
                             side: sideCell?.textContent?.trim() || null,
                             rowTypes: results
@@ -1371,6 +1575,36 @@ export class TradingViewClient {
             if (marginResult.marginText) {
                 marginAmount = parseFloat(marginResult.marginText.replace(/,/g, ''));
                 log(`   Actual margin used: $${marginAmount.toLocaleString()}`);
+            } else if (IS_PROD) {
+                // For Coinbase prod mode, read Initial margin from Account Summary tab
+                log("   [PROD] Reading margin from Account Summary tab...");
+                const summaryTab = await this.page.$('button#summary');
+                if (summaryTab) {
+                    await summaryTab.click();
+                    await this.delay(1000);
+                    log("   [PROD] Account Summary tab clicked");
+
+                    // Find the "Initial margin" row and read the Amount column
+                    const initialMarginResult = await this.page.evaluate(() => {
+                        const row = document.querySelector('tr[data-row-id="initialMargin"]');
+                        if (!row) return { found: false, amount: null };
+
+                        const amountCell = row.querySelector('td[data-label="Amount"] span span:first-child');
+                        return {
+                            found: true,
+                            amount: amountCell?.textContent?.trim() || null
+                        };
+                    });
+
+                    if (initialMarginResult.found && initialMarginResult.amount) {
+                        marginAmount = parseFloat(initialMarginResult.amount.replace(/,/g, '')) || marginAmount;
+                        log(`   [PROD] Initial margin from Account Summary: $${marginAmount.toLocaleString()}`);
+                    } else {
+                        log("   [PROD] ⚠️ Could not read Initial margin from Account Summary");
+                    }
+                } else {
+                    log("   [PROD] ⚠️ Could not find Account Summary tab");
+                }
             } else {
                 log("   ⚠️ Could not read actual margin from Order History, using estimate");
             }
@@ -1407,7 +1641,7 @@ export class TradingViewClient {
                 log(`   ⚠️ [DOM] Could not find Positions tab`);
             }
 
-            const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
+            const totalTime = logger.getElapsedSeconds().toFixed(2);
 
             // === CRITICAL VALIDATION: Check if order actually executed ===
             // Only fail if BOTH conditions are true:
@@ -1436,7 +1670,7 @@ export class TradingViewClient {
                 return {
                     success: false,
                     error: `Order failed: No position created (entry price = 0) and no recent Market order in Order History. The order button was clicked but no order was placed.`,
-                    executionLogs: logs
+                    executionLogs: getLogs()
                 };
             }
 
@@ -1448,9 +1682,10 @@ export class TradingViewClient {
                 log(`   Or the position was immediately closed by TP/SL`);
             }
 
-            log(`\n✅ Order placed successfully!`);
-            log(`   Total execution time: ${totalTime}s`);
-            log(`${"═".repeat(60)}\n`);
+            logger.startSection('result');
+            logger.success(`Order placed successfully!`);
+            logger.log(`Total execution time: ${totalTime}s`);
+            logger.header('ORDER COMPLETE', 'end');
 
             return {
                 success: true,
@@ -1460,11 +1695,12 @@ export class TradingViewClient {
                     entryPrice,
                     quantity: actualQuantity,
                     marginUsed: marginAmount,
+                    fee: feeAmount,
                     takeProfit: params.takeProfit,
                     stopLoss: params.stopLoss,
                     timestamp: new Date().toISOString()
                 },
-                executionLogs: logs
+                executionLogs: getLogs()
             };
 
         } catch (error) {
@@ -1477,13 +1713,15 @@ export class TradingViewClient {
                 errorMsg.includes('Session closed');
 
             if (isCDPError && !isRetry) {
-                log("\n⚠️  CDP error during order placement. Restarting browser and retrying...");
+                logger.warn("CDP error during order placement. Restarting browser and retrying...");
                 await this.restartBrowser();
                 return this.placeMarketOrder(params, true);
             }
 
-            log(`❌ Order placement failed: ${errorMsg}`);
-            return { success: false, error: errorMsg, executionLogs: logs };
+            logger.startSection('error');
+            logger.error(`Order placement failed: ${errorMsg}`);
+            logger.header('ORDER FAILED', 'error');
+            return { success: false, error: errorMsg, executionLogs: getLogs() };
         }
     }
 
